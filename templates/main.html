@@ -17,7 +17,7 @@
 {{range .Articles}}
 <div class="card" data-source="{{.Source}}" data-score="{{.AIScore}}" data-url="{{.URL}}">
   {{if .OGImage}}
-  <div class="card-thumb"><img src="{{.OGImage}}" alt="" loading="lazy" onerror="this.closest('.card-thumb').replaceWith(Object.assign(document.createElement('div'),{className:'card-no-thumb',innerHTML:'<span class=\'score-big {{scoreClass .AIScore}}\'>{{if gt .AIScore 0}}{{.AIScore}}{{else}}?{{end}}</span>'}))"></div>
+  <div class="card-thumb"><a href="{{.URL}}" target="_blank" rel="noopener"><img src="{{.OGImage}}" alt="" loading="lazy" onerror="this.closest('.card-thumb').replaceWith(Object.assign(document.createElement('div'),{className:'card-no-thumb',innerHTML:'<span class=\'score-big {{scoreClass .AIScore}}\'>{{if gt .AIScore 0}}{{.AIScore}}{{else}}?{{end}}</span>'}))"></a></div>
   {{else}}
   <div class="card-no-thumb"><span class="score-big {{scoreClass .AIScore}}">{{if gt .AIScore 0}}{{.AIScore}}{{else}}?{{end}}</span></div>
   {{end}}
