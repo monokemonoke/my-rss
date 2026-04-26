@@ -48,6 +48,7 @@ var CLI struct {
 // ─── Feed config ───────────────────────────────────────────────────────────────
 
 type FeedConfig struct {
+	ID        string `yaml:"id"`
 	Name      string `yaml:"name"`
 	Type      string `yaml:"type"` // hn, rss, atom, rdf, reddit
 	URL       string `yaml:"url"`

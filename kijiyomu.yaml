@@ -6,56 +6,97 @@ profile: |
   - 関心低め: スポーツ
 
 feeds:
-  - name: Hacker News
-    type: hn
-    limit: 50
+  - id: "10561868418055"
+    name: 勉強会スライドBot
+    type: rss
+    url: https://yuji.software/tech_slideshare/feed.xml
 
-  - name: はてなブックマーク
-    type: rdf
-    url: https://b.hatena.ne.jp/hotentry/it.rss
+  - id: "10429403247014"
+    name: s-miyawaki
+    type: rss
+    url: https://note.com/catshun_/rss
 
-  - name: Zenn
+  - id: "9871003092950"
+    name: Main Blog
+    type: rss
+    url: https://blog.agent.ai/rss.xml
+
+  - id: "9869595690533"
+    name: Made by Agents
+    type: rss
+    url: https://www.madebyagents.com/rss.xml
+
+  - id: "9873041496322"
+    name: Algomatic Tech Blog
+    type: rss
+    url: https://tech.algomatic.jp/rss
+
+  - id: "9873034765538"
+    name: OpenAI News
+    type: rss
+    url: https://openai.com/blog/rss.xml
+
+  - id: "9876592025860"
+    name: Anthropic News
+    type: rss
+    url: https://raw.githubusercontent.com/Olshansk/rss-feeds/refs/heads/main/feeds/feed_anthropic.xml
+
+  - id: "9869566727157"
+    name: 'ArXiv Query: search_query=all:"AI agent"&id_list=&start=0&max_results=10'
+    type: atom
+    url: 'https://export.arxiv.org/api/query?search_query=all:%22AI%20agent%22&sortBy=submittedDate&sortOrder=descending'
+
+  - id: "9885907083169"
+    name: CyberAgent Developers Blog | サイバーエージェント デベロッパーズブログ
+    type: rss
+    url: https://developers.cyberagent.co.jp/blog/feed/
+
+  - id: "9870954515302"
+    name: LINEヤフー Tech Blog (LY Corporation Tech Blog
+    type: rss
+    url: https://techblog.lycorp.co.jp/ja/feed/index.xml
+
+  - id: "9872999589426"
+    name: Blog - Uzabase for Engineers
+    type: rss
+    url: https://tech.uzabase.com/rss/category/Blog
+
+  - id: "9869534064005"
+    name: BASEプロダクトチームブログ
+    type: rss
+    url: https://devblog.thebase.in/rss
+
+  - id: "9869532665397"
+    name: メルカリエンジニアリングブログ
+    type: rss
+    url: https://engineering.mercari.com/blog/feed.xml
+
+  - id: "9857526431319"
+    name: LIFULL Creators Blog
+    type: rss
+    url: https://www.lifull.blog/rss
+
+  - id: "9872976070674"
+    name: ZOZO TECH BLOG
+    type: rss
+    url: https://techblog.zozo.com/rss
+
+  - id: "9876531539044"
+    name: LayerX エンジニアブログ
+    type: rss
+    url: https://tech.layerx.co.jp/rss
+
+  - id: "9857513696455"
+    name: freee Developers Hub
+    type: rss
+    url: https://developers.freee.co.jp/rss
+
+  - id: "9857512145143"
+    name: Sansan Tech Blog
+    type: rss
+    url: https://buildersbox.corp-sansan.com/rss
+
+  - id: "9426745754000"
+    name: Zennのトレンド
     type: rss
     url: https://zenn.dev/feed
-
-  - name: Qiita
-    type: atom
-    url: https://qiita.com/popular-items/feed
-
-  - name: Classmethod
-    type: rss
-    url: https://dev.classmethod.jp/feed/
-
-  - name: Lobsters
-    type: rss
-    url: https://lobste.rs/rss
-
-  - name: Gizmodo JP
-    type: rss
-    url: https://www.gizmodo.jp/index.xml
-
-  - name: ROOMIE
-    type: rss
-    url: https://www.roomie.jp/feed/
-
-  - name: Reddit r/rust
-    type: reddit
-    subreddit: rust
-
-  - name: Reddit r/golang
-    type: reddit
-    subreddit: golang
-
-  - name: Reddit r/programming
-    type: reddit
-    subreddit: programming
-
-  - name: Google さくらインターネット
-    type: rss
-    url: 'https://news.google.com/rss/topics/CAAqJQgKIh9DQkFTRVFvTEwyY3ZNVEl4WW5jeE1HUVNBbXBoS0FBUAE?ceid=JP:ja&oc=3&hl=ja&gl=JP'
-
-  - name: 日本 - 最新 - Google ニュース
-    type: rss
-    url: 'https://news.google.com/rss/topics/CAAqIQgKIhtDQkFTRGdvSUwyMHZNRE5mTTJRU0FtcGhLQUFQAQ?hl=ja&gl=JP&ceid=JP:ja'
-
-
