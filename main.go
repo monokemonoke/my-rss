@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -892,6 +893,88 @@ func renderHTML(path string, renderData RenderData) error {
 	return tmpl.Execute(f, data)
 }
 
+// ─── PWA files ────────────────────────────────────────────────────────────────
+
+const swJS = `const CACHE = 'kijiyomu-v1';
+
+self.addEventListener('install', () => self.skipWaiting());
+
+self.addEventListener('activate', e => {
+  e.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', e => {
+  if (e.request.mode !== 'navigate') return;
+  e.respondWith(
+    fetch(e.request)
+      .then(res => {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy));
+        return res;
+      })
+      .catch(() => caches.match(e.request))
+  );
+});
+`
+
+func writePWAFiles(outHTMLPath string) error {
+	dir := filepath.Dir(outHTMLPath)
+	htmlName := filepath.Base(outHTMLPath)
+
+	if err := os.WriteFile(filepath.Join(dir, "icon-192.png"), faviconPNG, 0644); err != nil {
+		return fmt.Errorf("write icon-192.png: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "icon-512.png"), faviconPNG, 0644); err != nil {
+		return fmt.Errorf("write icon-512.png: %w", err)
+	}
+
+	type icon struct {
+		Src     string `json:"src"`
+		Sizes   string `json:"sizes"`
+		Type    string `json:"type"`
+		Purpose string `json:"purpose,omitempty"`
+	}
+	manifest := struct {
+		Name            string `json:"name"`
+		ShortName       string `json:"short_name"`
+		Description     string `json:"description"`
+		StartURL        string `json:"start_url"`
+		Display         string `json:"display"`
+		BackgroundColor string `json:"background_color"`
+		ThemeColor      string `json:"theme_color"`
+		Icons           []icon `json:"icons"`
+	}{
+		Name:            "KijiYomu",
+		ShortName:       "KijiYomu",
+		Description:     "AIキュレーションRSSリーダー",
+		StartURL:        "./" + htmlName,
+		Display:         "standalone",
+		BackgroundColor: "#F8F8FB",
+		ThemeColor:      "#F8F8FB",
+		Icons: []icon{
+			{Src: "icon-192.png", Sizes: "192x192", Type: "image/png"},
+			{Src: "icon-512.png", Sizes: "512x512", Type: "image/png", Purpose: "any maskable"},
+		},
+	}
+	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal manifest: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), manifestJSON, 0644); err != nil {
+		return fmt.Errorf("write manifest.json: %w", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "sw.js"), []byte(swJS), 0644); err != nil {
+		return fmt.Errorf("write sw.js: %w", err)
+	}
+
+	return nil
+}
+
 // ─── Template helpers ─────────────────────────────────────────────────────────
 
 func scoreClass(score int) string {
@@ -936,6 +1019,9 @@ func main() {
 		}
 		if err := renderHTML(CLI.Out, *renderData); err != nil {
 			log.Fatalf("render HTML: %v", err)
+		}
+		if err := writePWAFiles(CLI.Out); err != nil {
+			log.Printf("[WARN] PWA files: %v", err)
 		}
 		log.Printf("Written: %s (%d articles)", CLI.Out, len(renderData.Articles))
 		return
@@ -1047,6 +1133,9 @@ func main() {
 	}
 	if err := renderHTML(CLI.Out, renderData); err != nil {
 		log.Fatalf("render HTML: %v", err)
+	}
+	if err := writePWAFiles(CLI.Out); err != nil {
+		log.Printf("[WARN] PWA files: %v", err)
 	}
 	log.Printf("Written: %s (%d articles)", CLI.Out, len(allArticles))
 }

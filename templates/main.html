@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>KijiYomu - {{.Date}}</title>
 <link rel="icon" type="image/png" href="{{.FaviconDataURI}}">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#F8F8FB" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0F0F12" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="KijiYomu">
 <script>(function(){var t=localStorage.getItem('kijiyomu-theme')||(window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.dataset.theme=t;})()</script>
 <style>{{.CSS}}</style>
 </head>
@@ -20,5 +27,6 @@
 </div>
 <script id="articles-data" type="application/json">{{.ArticlesJSON}}</script>
 <script type="module">{{.JS}}</script>
+<script>if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js');</script>
 </body>
 </html>
