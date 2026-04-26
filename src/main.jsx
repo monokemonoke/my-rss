@@ -1,5 +1,6 @@
-import React, { createElement as h, useEffect, useRef, useState } from 'react';
+import React, { createElement as h, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Search } from 'lucide-react';
 import './style.css';
 
 const TWEMOJI_CDN = 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/';
@@ -55,6 +56,15 @@ function Thumb({ article }) {
 
 function ArticleCard({ article }) {
   const bullets = Array.isArray(article.summary) ? article.summary : [];
+  const tags = Array.isArray(article.tags) ? article.tags.slice(0, 3) : [];
+  const openArticle = (event) => {
+    if (!article.url || event.target.closest('a, button')) return;
+    window.open(article.url, '_blank', 'noopener');
+  };
+  const openArticleByKey = (event) => {
+    if (event.key !== 'Enter') return;
+    openArticle(event);
+  };
 
   return h(
     'article',
@@ -62,7 +72,7 @@ function ArticleCard({ article }) {
     h(Thumb, { article }),
     h(
       'div',
-      { className: 'card-body' },
+      { className: 'card-body', role: 'link', tabIndex: 0, onClick: openArticle, onKeyDown: openArticleByKey },
       h('div', { className: 'card-title' },
         h('a', { href: article.url, target: '_blank', rel: 'noopener' }, article.title || '')
       ),
@@ -70,6 +80,7 @@ function ArticleCard({ article }) {
         'div',
         { className: 'card-meta' },
         h('span', { className: 'source-tag' }, article.source),
+        ...tags.map((tag) => h('span', { className: 'article-tag', key: tag }, tag)),
         article.date ? h('time', { className: 'published-date', dateTime: article.date }, dateLabel(article.date)) : null,
         article.score > 0 ? h('span', { className: 'hn-score' }, `▲${article.score}`) : null
       ),
@@ -80,8 +91,77 @@ function ArticleCard({ article }) {
   );
 }
 
+function tagStatsFromArticles(articles) {
+  const counts = new Map();
+  for (const article of articles) {
+    const tags = Array.isArray(article.tags) ? article.tags : [];
+    for (const tag of tags) {
+      if (!tag) continue;
+      counts.set(tag, (counts.get(tag) || 0) + 1);
+    }
+  }
+  return Array.from(counts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+function TagFilter({ tags, selectedTag, open, onToggleOpen, onSelectTag }) {
+  return h(
+    'div',
+    { className: 'tag-filter' },
+    h(
+      'div',
+      { className: `tag-panel${open ? ' tag-panel-open' : ''}`, 'aria-hidden': open ? 'false' : 'true' },
+      h(
+        'button',
+        {
+          type: 'button',
+          className: `filter-chip${selectedTag === null ? ' filter-chip-active' : ''}`,
+          tabIndex: open ? 0 : -1,
+          onClick: () => onSelectTag(null),
+        },
+        'すべて'
+      ),
+      ...tags.map(({ name, count }) => h(
+        'button',
+        {
+          type: 'button',
+          key: name,
+          className: `filter-chip${selectedTag === name ? ' filter-chip-active' : ''}`,
+          tabIndex: open ? 0 : -1,
+          onClick: () => onSelectTag(selectedTag === name ? null : name),
+        },
+        h('span', null, name),
+        h('span', { className: 'filter-chip-count' }, String(count))
+      ))
+    ),
+    h(
+      'button',
+      {
+        type: 'button',
+        className: `filter-toggle${open ? ' filter-toggle-active' : ''}`,
+        'aria-label': 'タグで絞り込む',
+        'aria-expanded': open ? 'true' : 'false',
+        onClick: onToggleOpen,
+      },
+      h(Search, { size: 24, strokeWidth: 2, 'aria-hidden': 'true' })
+    )
+  );
+}
+
 function App({ articles }) {
   const gridRef = useRef(null);
+  const [selectedTag, setSelectedTag] = useState(null);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const tags = useMemo(() => tagStatsFromArticles(articles), [articles]);
+  const visibleArticles = useMemo(() => {
+    if (!selectedTag) return articles;
+    return articles.filter((article) => Array.isArray(article.tags) && article.tags.includes(selectedTag));
+  }, [articles, selectedTag]);
+  const handleSelectTag = (tag) => {
+    setSelectedTag(tag);
+    setFilterOpen(false);
+  };
 
   useEffect(() => {
     const header = document.querySelector('header');
@@ -97,10 +177,38 @@ function App({ articles }) {
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setFilterOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const label = document.getElementById('selected-tag-label');
+    if (!label) return;
+    label.hidden = !selectedTag;
+    label.textContent = selectedTag ? `タグ: ${selectedTag}` : '';
+  }, [selectedTag]);
+
   return h(
-    'div',
-    { className: 'card-grid', ref: gridRef },
-    articles.map((article, index) => h(ArticleCard, { key: article.url || index, article }))
+    React.Fragment,
+    null,
+    h(
+      'div',
+      { className: 'card-grid', ref: gridRef },
+      visibleArticles.map((article, index) => h(ArticleCard, { key: article.url || index, article }))
+    ),
+    tags.length > 0
+      ? h(TagFilter, {
+          tags,
+          selectedTag,
+          open: filterOpen,
+          onToggleOpen: () => setFilterOpen((value) => !value),
+          onSelectTag: handleSelectTag,
+        })
+      : null
   );
 }
 

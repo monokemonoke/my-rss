@@ -40,3 +40,44 @@ func TestDateLabelFormatsArticleDate(t *testing.T) {
 		t.Fatalf("dateLabel = %q, want 2026-04-23", got)
 	}
 }
+
+func TestConfiguredArticleTagsUsesDefaultsForMissingConfig(t *testing.T) {
+	got := configuredArticleTags(nil)
+	if len(got) < requiredArticleTagCount {
+		t.Fatalf("len = %d, want at least %d", len(got), requiredArticleTagCount)
+	}
+}
+
+func TestCompleteArticleTagsKeepsAllowedUniqueTagsAndFillsToThree(t *testing.T) {
+	allowed := []string{"AI/LLM", "開発ツール", "研究/論文", "その他"}
+	got := completeArticleTags(
+		[]string{"AI/LLM", "AI/LLM", "unknown"},
+		[]string{"開発ツール", "その他"},
+		allowed,
+	)
+	want := []string{"AI/LLM", "開発ツール", "その他"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("tags = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestFallbackArticleTagsReturnsExactlyThreeTags(t *testing.T) {
+	allowed := defaultArticleTags
+	article := Article{
+		Title:  "RustでLLM agent CLIを作る",
+		Source: "Zenn",
+		Summary: []string{
+			"RustでAIエージェントを実装する開発ツールの記事",
+		},
+	}
+
+	got := fallbackArticleTags(article, allowed)
+	if len(got) != requiredArticleTagCount {
+		t.Fatalf("len = %d, want %d: %#v", len(got), requiredArticleTagCount, got)
+	}
+}

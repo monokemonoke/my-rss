@@ -66,6 +66,7 @@ type FeedConfig struct {
 
 type Config struct {
 	Feeds []FeedConfig `yaml:"feeds"`
+	Tags  []string     `yaml:"tags"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -90,6 +91,7 @@ type Article struct {
 	OGImage string   `json:"og_image,omitempty"` // og:image URL
 	Date    string   `json:"date,omitempty"`     // RFC3339 published date
 	Summary []string `json:"summary,omitempty"`  // 3-bullet Japanese summary
+	Tags    []string `json:"tags,omitempty"`     // exactly 3 tags from configured vocabulary
 }
 
 type RenderData struct {
@@ -156,6 +158,7 @@ type HNStory struct {
 type CacheEntry struct {
 	OGImage string   `json:"og_image,omitempty"` // og:image URL ("-" = not found)
 	Summary []string `json:"summary,omitempty"`  // 3-bullet Japanese summary
+	Tags    []string `json:"tags,omitempty"`     // exactly 3 tags from configured vocabulary
 }
 
 type Cache struct {
@@ -206,6 +209,178 @@ func (c *Cache) set(u string, entry CacheEntry) {
 // ─── Fetchers ─────────────────────────────────────────────────────────────────
 
 const recentArticleMonths = 2
+const requiredArticleTagCount = 3
+
+var defaultArticleTags = []string{
+	"AI/LLM",
+	"AIエージェント",
+	"研究/論文",
+	"開発ツール",
+	"プログラミング言語",
+	"Web/フロントエンド",
+	"バックエンド/API",
+	"インフラ/クラウド",
+	"データベース",
+	"セキュリティ",
+	"モバイル",
+	"ゲーム開発",
+	"プロダクト/事例",
+	"組織/キャリア",
+	"デザイン/UX",
+	"その他",
+}
+
+var articleTagKeywords = map[string][]string{
+	"AI/LLM":      {"ai", "llm", "gpt", "openai", "claude", "gemini", "生成ai", "大規模言語モデル"},
+	"AIエージェント":    {"agent", "エージェント", "mcp", "codex", "claude code", "copilot"},
+	"研究/論文":       {"paper", "arxiv", "research", "論文", "研究", "experiment", "benchmark"},
+	"開発ツール":       {"tool", "cli", "ide", "editor", "vscode", "github", "devtool", "開発ツール"},
+	"プログラミング言語":   {"rust", "go", "golang", "typescript", "python", "java", "言語", "compiler", "コンパイラ"},
+	"Web/フロントエンド": {"react", "vue", "frontend", "front-end", "css", "html", "browser", "web", "フロントエンド"},
+	"バックエンド/API":  {"api", "backend", "server", "grpc", "openapi", "microservice", "バックエンド"},
+	"インフラ/クラウド":   {"cloud", "aws", "gcp", "azure", "kubernetes", "docker", "terraform", "infra", "インフラ"},
+	"データベース":      {"database", "db", "sql", "postgres", "mysql", "sqlite", "redis", "データベース"},
+	"セキュリティ":      {"security", "auth", "認証", "認可", "脆弱性", "oauth", "暗号", "セキュリティ"},
+	"モバイル":        {"ios", "android", "flutter", "swift", "kotlin", "mobile", "モバイル"},
+	"ゲーム開発":       {"game", "unity", "unreal", "ue5", "phaser", "minecraft", "ゲーム"},
+	"プロダクト/事例":    {"case study", "事例", "導入", "product", "プロダクト", "release", "launch"},
+	"組織/キャリア":     {"team", "organization", "career", "採用", "組織", "チーム", "マネジメント"},
+	"デザイン/UX":     {"design", "ux", "ui", "figma", "デザイン", "ユーザー体験"},
+}
+
+func configuredArticleTags(cfg *Config) []string {
+	if cfg == nil || len(cfg.Tags) == 0 {
+		return append([]string(nil), defaultArticleTags...)
+	}
+
+	tags := uniqueTrimmedStrings(cfg.Tags)
+	if len(tags) < requiredArticleTagCount {
+		log.Printf("[WARN] config tags must contain at least %d entries; using defaults", requiredArticleTagCount)
+		return append([]string(nil), defaultArticleTags...)
+	}
+	return tags
+}
+
+func uniqueTrimmedStrings(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func normalizeArticleTags(tags, allowedTags []string) []string {
+	allowed := map[string]bool{}
+	for _, tag := range allowedTags {
+		allowed[tag] = true
+	}
+
+	result := make([]string, 0, requiredArticleTagCount)
+	seen := map[string]bool{}
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || !allowed[tag] || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		result = append(result, tag)
+		if len(result) == requiredArticleTagCount {
+			return result
+		}
+	}
+	return result
+}
+
+func completeArticleTags(tags, fallback, allowedTags []string) []string {
+	result := normalizeArticleTags(tags, allowedTags)
+	seen := map[string]bool{}
+	for _, tag := range result {
+		seen[tag] = true
+	}
+
+	for _, tag := range fallback {
+		if len(result) == requiredArticleTagCount {
+			return result
+		}
+		if strings.TrimSpace(tag) == "" || seen[tag] {
+			continue
+		}
+		for _, allowed := range allowedTags {
+			if tag == allowed {
+				result = append(result, tag)
+				seen[tag] = true
+				break
+			}
+		}
+	}
+
+	for _, tag := range allowedTags {
+		if len(result) == requiredArticleTagCount {
+			return result
+		}
+		if !seen[tag] {
+			result = append(result, tag)
+			seen[tag] = true
+		}
+	}
+	return result
+}
+
+func fallbackArticleTags(article Article, allowedTags []string) []string {
+	text := strings.ToLower(strings.Join([]string{
+		article.Title,
+		article.Source,
+		strings.Join(article.Summary, " "),
+		article.URL,
+	}, " "))
+
+	type scoredTag struct {
+		tag   string
+		score int
+		index int
+	}
+
+	scored := make([]scoredTag, 0, len(allowedTags))
+	for i, tag := range allowedTags {
+		score := 0
+		for _, keyword := range articleTagKeywords[tag] {
+			if strings.Contains(text, strings.ToLower(keyword)) {
+				score++
+			}
+		}
+		scored = append(scored, scoredTag{tag: tag, score: score, index: i})
+	}
+
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		return scored[i].index < scored[j].index
+	})
+
+	fallback := make([]string, 0, requiredArticleTagCount)
+	for _, item := range scored {
+		if item.score == 0 {
+			continue
+		}
+		fallback = append(fallback, item.tag)
+	}
+	fallback = append(fallback, "その他")
+	return completeArticleTags(nil, fallback, allowedTags)
+}
+
+func ensureArticleTags(articles []Article, allowedTags []string) []Article {
+	for i := range articles {
+		articles[i].Tags = completeArticleTags(articles[i].Tags, fallbackArticleTags(articles[i], allowedTags), allowedTags)
+	}
+	return articles
+}
 
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
@@ -778,13 +953,8 @@ func summarizeArticles(articles []Article, client *openai.Client, model string, 
 				return
 			}
 
-			content = strings.TrimSpace(content)
-			content = strings.TrimPrefix(content, "```json")
-			content = strings.TrimPrefix(content, "```")
-			content = strings.TrimSuffix(content, "```")
-
-			var bullets []string
-			if err := json.Unmarshal([]byte(content), &bullets); err != nil {
+			bullets, err := parseAIStringArray(content)
+			if err != nil {
 				log.Printf("[WARN] summarize JSON parse %s: %v", a.URL, err)
 				return
 			}
@@ -792,6 +962,92 @@ func summarizeArticles(articles []Article, client *openai.Client, model string, 
 			a.Summary = bullets
 			e, _ := cache.get(a.URL)
 			e.Summary = bullets
+			cache.set(a.URL, e)
+		}(idx)
+	}
+	wg.Wait()
+	return articles
+}
+
+const tagSystemPrompt = `あなたは技術記事のタグ分類アシスタントです。
+ユーザーが提示する候補タグの中から、記事に最も合うタグを重複なしで必ず3つ選んでください。
+必ずJSON配列のみ返すこと。説明文・前置き・コードブロック記法は不要。
+例: ["AI/LLM", "開発ツール", "プロダクト/事例"]`
+
+func buildTagPrompt(article Article, allowedTags []string) string {
+	return fmt.Sprintf(
+		"候補タグ:\n- %s\n\nタイトル: %s\nソース: %s\nURL: %s\n要約:\n- %s",
+		strings.Join(allowedTags, "\n- "),
+		article.Title,
+		article.Source,
+		article.URL,
+		strings.Join(article.Summary, "\n- "),
+	)
+}
+
+func parseAIStringArray(content string) ([]string, error) {
+	content = strings.TrimSpace(content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var values []string
+	if err := json.Unmarshal([]byte(content), &values); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+// tagArticles は定義済みタグから各記事に3タグを付与する（キャッシュ済みはスキップ）
+func tagArticles(articles []Article, client *openai.Client, model string, cache *Cache, allowedTags []string) []Article {
+	uncached := make([]int, 0, len(articles))
+	for i := range articles {
+		if e, ok := cache.get(articles[i].URL); ok && len(e.Tags) > 0 {
+			tags := normalizeArticleTags(e.Tags, allowedTags)
+			if len(tags) == requiredArticleTagCount {
+				articles[i].Tags = tags
+				continue
+			}
+		}
+
+		tags := normalizeArticleTags(articles[i].Tags, allowedTags)
+		if len(tags) == requiredArticleTagCount {
+			articles[i].Tags = tags
+			continue
+		}
+		uncached = append(uncached, i)
+	}
+	log.Printf("  tagging %d articles (cached: %d)", len(uncached), len(articles)-len(uncached))
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 3) // AI API への同時リクエスト数を制限
+
+	for _, idx := range uncached {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			a := &articles[i]
+			content, err := callAI(client, model, tagSystemPrompt, buildTagPrompt(*a, allowedTags))
+			if err != nil {
+				log.Printf("[WARN] tag %s: %v", a.URL, err)
+				a.Tags = fallbackArticleTags(*a, allowedTags)
+				return
+			}
+
+			values, err := parseAIStringArray(content)
+			if err != nil {
+				log.Printf("[WARN] tag JSON parse %s: %v", a.URL, err)
+				a.Tags = fallbackArticleTags(*a, allowedTags)
+				return
+			}
+
+			a.Tags = completeArticleTags(values, fallbackArticleTags(*a, allowedTags), allowedTags)
+			e, _ := cache.get(a.URL)
+			e.Tags = a.Tags
 			cache.set(a.URL, e)
 		}(idx)
 	}
@@ -851,14 +1107,14 @@ func renderHTML(path string, renderData RenderData) error {
 	}
 
 	data := struct {
-		Date            string
-		Articles        []Article
-		Sources         []string
-		ArticlesJSON    template.JS
-		CSS             template.CSS
-		JS              template.JS
-		LogoDataURI     template.URL
-		FaviconDataURI  template.URL
+		Date           string
+		Articles       []Article
+		Sources        []string
+		ArticlesJSON   template.JS
+		CSS            template.CSS
+		JS             template.JS
+		LogoDataURI    template.URL
+		FaviconDataURI template.URL
 	}{
 		Date:           renderData.Date,
 		Articles:       renderData.Articles,
@@ -976,12 +1232,19 @@ func main() {
 	kong.Parse(&CLI)
 
 	cache := loadCache(CLI.CacheFile)
+	var feedCfg *Config
+	if cfg, err := loadConfig(CLI.Config); err != nil {
+		log.Printf("[WARN] config load (%s): %v", CLI.Config, err)
+	} else {
+		feedCfg = cfg
+	}
+	allowedTags := configuredArticleTags(feedCfg)
 
 	var aiClient *openai.Client
 	if CLI.APIBase != "" {
 		aiClient = newAIClient(CLI.APIBase, CLI.APIKey)
 	} else {
-		log.Println("[INFO] AI_API_BASE not set — summarization skipped")
+		log.Println("[INFO] AI_API_BASE not set — AI summarization/tagging skipped")
 	}
 
 	if CLI.DataIn != "" {
@@ -989,7 +1252,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("load intermediate data: %v", err)
 		}
+		renderData.SchemaVersion = 2
 		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, time.Now())
+		renderData.Articles = ensureArticleTags(renderData.Articles, allowedTags)
 		renderData.Sources = collectSources(renderData.Articles)
 		if CLI.DataOut != "" {
 			if err := saveRenderData(CLI.DataOut, *renderData); err != nil {
@@ -1015,11 +1280,7 @@ func main() {
 	}
 
 	var jobs []fetchJob
-	var feedCfg *Config
-	if cfg, err := loadConfig(CLI.Config); err != nil {
-		log.Printf("[WARN] config load (%s): %v", CLI.Config, err)
-	} else {
-		feedCfg = cfg
+	if feedCfg != nil {
 		for _, f := range feedCfg.Feeds {
 			limit := f.Limit
 			if limit == 0 {
@@ -1080,12 +1341,16 @@ func main() {
 	if aiClient != nil {
 		log.Printf("Summarizing with AI (model: %s)...", CLI.Model)
 		allArticles = summarizeArticles(allArticles, aiClient, CLI.Model, cache)
+		log.Printf("Tagging with AI (model: %s)...", CLI.Model)
+		allArticles = tagArticles(allArticles, aiClient, CLI.Model, cache, allowedTags)
+	} else {
+		allArticles = ensureArticleTags(allArticles, allowedTags)
 	}
 
 	cache.save()
 
 	renderData := RenderData{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		Date:          time.Now().Format("2006-01-02 15:04"),
 		Articles:      allArticles,
 		Sources:       collectSources(allArticles),

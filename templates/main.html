@@ -20,6 +20,7 @@
 <header>
   <h1><img class="site-logo" src="{{.LogoDataURI}}" alt="KijiYomu"></h1>
   <span>{{.Date}} — {{len .Articles}} 件</span>
+  <span class="selected-tag-label" id="selected-tag-label" hidden></span>
   <button class="theme-toggle" id="theme-toggle" onclick="(function(){var n=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=n;localStorage.setItem('kijiyomu-theme',n);document.getElementById('theme-toggle').textContent=n==='dark'?'☀':'☾';})()" title="テーマ切り替え">☾</button>
 </header>
 <script>(function(){var t=document.documentElement.dataset.theme;document.getElementById('theme-toggle').textContent=t==='dark'?'☀':'☾';})()</script>

@@ -83,9 +83,27 @@ go run main.go --data-in kijiyomu-data.json --out kijiyomu.html
 
 ## フィードソースの設定（kijiyomu.yaml）
 
-`kijiyomu.yaml` でフィードソースを自由に追加・削除できます。
+`kijiyomu.yaml` でタグの種類とフィードソースを自由に追加・削除できます。記事には `tags` の候補から重複なしで3つのタグが付きます。
 
 ```yaml
+tags:
+  - AI/LLM
+  - AIエージェント
+  - 研究/論文
+  - 開発ツール
+  - プログラミング言語
+  - Web/フロントエンド
+  - バックエンド/API
+  - インフラ/クラウド
+  - データベース
+  - セキュリティ
+  - モバイル
+  - ゲーム開発
+  - プロダクト/事例
+  - 組織/キャリア
+  - デザイン/UX
+  - その他
+
 feeds:
   - name: Hacker News
     type: hn
