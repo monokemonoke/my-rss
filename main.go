@@ -37,6 +37,9 @@ var jsContent string
 //go:embed static/logo.png
 var logoPNG []byte
 
+//go:embed static/favicon.png
+var faviconPNG []byte
+
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
 var CLI struct {
@@ -862,21 +865,23 @@ func renderHTML(path string, renderData RenderData) error {
 	}
 
 	data := struct {
-		Date         string
-		Articles     []Article
-		Sources      []string
-		ArticlesJSON template.JS
-		CSS          template.CSS
-		JS           template.JS
-		LogoDataURI  template.URL
+		Date            string
+		Articles        []Article
+		Sources         []string
+		ArticlesJSON    template.JS
+		CSS             template.CSS
+		JS              template.JS
+		LogoDataURI     template.URL
+		FaviconDataURI  template.URL
 	}{
-		Date:         renderData.Date,
-		Articles:     renderData.Articles,
-		Sources:      renderData.Sources,
-		ArticlesJSON: template.JS(articlesJSON),
-		CSS:          template.CSS(cssContent),
-		JS:           template.JS(jsContent),
-		LogoDataURI:  template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(logoPNG)),
+		Date:           renderData.Date,
+		Articles:       renderData.Articles,
+		Sources:        renderData.Sources,
+		ArticlesJSON:   template.JS(articlesJSON),
+		CSS:            template.CSS(cssContent),
+		JS:             template.JS(jsContent),
+		LogoDataURI:    template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(logoPNG)),
+		FaviconDataURI: template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(faviconPNG)),
 	}
 
 	f, err := os.Create(path)
