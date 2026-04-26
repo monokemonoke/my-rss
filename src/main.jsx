@@ -16,8 +16,8 @@ function hashInt(str) {
 }
 
 const CARD_MIN_WIDTH = 280;
-const CARD_BODY_HEIGHT_DESKTOP = 148;
-const CARD_BODY_HEIGHT_MOBILE = 132;
+const CARD_HEIGHT_DESKTOP = 150;
+const CARD_HEIGHT_MOBILE = 130;
 const OVERSCAN_ROWS = 3;
 
 function readArticles() {
@@ -51,19 +51,19 @@ function gapForViewport() {
   return window.matchMedia('(max-width: 640px)').matches ? 16 : 24;
 }
 
-function bodyHeightForViewport() {
-  return window.matchMedia('(max-width: 640px)').matches ? CARD_BODY_HEIGHT_MOBILE : CARD_BODY_HEIGHT_DESKTOP;
+function cardHeightForViewport() {
+  return window.matchMedia('(max-width: 640px)').matches ? CARD_HEIGHT_MOBILE : CARD_HEIGHT_DESKTOP;
 }
 
 function measureLayout(el) {
   if (!el) {
-    return { width: 0, columns: 1, gap: 24, cardWidth: CARD_MIN_WIDTH, cardHeight: 320, rowHeight: 344 };
+    return { width: 0, columns: 1, gap: 24, cardWidth: CARD_MIN_WIDTH, cardHeight: CARD_HEIGHT_DESKTOP, rowHeight: CARD_HEIGHT_DESKTOP + 24 };
   }
   const width = el.clientWidth;
   const gap = gapForViewport();
   const columns = Math.max(1, Math.floor((width + gap) / (CARD_MIN_WIDTH + gap)));
   const cardWidth = Math.max(CARD_MIN_WIDTH, (width - gap * (columns - 1)) / columns);
-  const cardHeight = Math.ceil(cardWidth * 9 / 16 + bodyHeightForViewport());
+  const cardHeight = cardHeightForViewport();
   return { width, columns, gap, cardWidth, cardHeight, rowHeight: cardHeight + gap };
 }
 
@@ -111,15 +111,15 @@ function ArticleCard({ article, index, selected, style }) {
       'div',
       { className: 'card-body' },
       h('div', { className: 'card-title' }, h('a', { href: article.url, target: '_blank', rel: 'noopener' }, title)),
-      originalTitle ? h('div', { className: 'card-title-orig' }, originalTitle) : null,
       h(
         'div',
         { className: 'card-meta' },
-        score > 0 ? h('span', { className: `score-badge ${scoreClass(score)}` }, score) : null,
         h('span', { className: 'source-tag' }, article.source),
         article.date ? h('time', { className: 'published-date', dateTime: article.date }, dateLabel(article.date)) : null,
+        score > 0 ? h('span', { className: `score-badge ${scoreClass(score)}` }, score) : null,
         article.score > 0 ? h('span', { className: 'hn-score' }, `▲${article.score}`) : null
-      )
+      ),
+      h('div', { className: 'card-summary' }, 'ほげほげほげほげほげほげ。ほげほげほげほげほげほげほげほげ。ほげほげほげほげほげほげほげほげほげ。')
     )
   );
 }
