@@ -212,7 +212,9 @@ const recentArticleMonths = 2
 const requiredArticleTagCount = 3
 
 var defaultArticleTags = []string{
-	"AI/LLM",
+	"LLM/言語モデル",
+	"生成AI",
+	"ML/機械学習",
 	"AIエージェント",
 	"研究/論文",
 	"開発ツール",
@@ -223,16 +225,16 @@ var defaultArticleTags = []string{
 	"データベース",
 	"セキュリティ",
 	"モバイル",
-	"ゲーム開発",
 	"プロダクト/事例",
-	"組織/キャリア",
 	"デザイン/UX",
 	"その他",
 }
 
 var articleTagKeywords = map[string][]string{
-	"AI/LLM":      {"ai", "llm", "gpt", "openai", "claude", "gemini", "生成ai", "大規模言語モデル"},
-	"AIエージェント":    {"agent", "エージェント", "mcp", "codex", "claude code", "copilot"},
+	"LLM/言語モデル":   {"llm", "gpt", "openai", "claude", "gemini", "llama", "mistral", "大規模言語モデル", "language model", "chatgpt", "chat model"},
+	"生成AI":        {"stable diffusion", "dall-e", "midjourney", "sora", "imagen", "text-to-image", "text-to-video", "multimodal", "マルチモーダル", "画像生成", "動画生成", "音声生成", "generative ai", "生成ai"},
+	"ML/機械学習":     {"machine learning", "deep learning", "neural network", "training", "fine-tuning", "dataset", "pytorch", "tensorflow", "huggingface", "inference", "quantization", "機械学習", "深層学習", "学習"},
+	"AIエージェント":    {"agent", "エージェント", "mcp", "codex", "claude code", "copilot", "autonomous"},
 	"研究/論文":       {"paper", "arxiv", "research", "論文", "研究", "experiment", "benchmark"},
 	"開発ツール":       {"tool", "cli", "ide", "editor", "vscode", "github", "devtool", "開発ツール"},
 	"プログラミング言語":   {"rust", "go", "golang", "typescript", "python", "java", "言語", "compiler", "コンパイラ"},
@@ -242,9 +244,7 @@ var articleTagKeywords = map[string][]string{
 	"データベース":      {"database", "db", "sql", "postgres", "mysql", "sqlite", "redis", "データベース"},
 	"セキュリティ":      {"security", "auth", "認証", "認可", "脆弱性", "oauth", "暗号", "セキュリティ"},
 	"モバイル":        {"ios", "android", "flutter", "swift", "kotlin", "mobile", "モバイル"},
-	"ゲーム開発":       {"game", "unity", "unreal", "ue5", "phaser", "minecraft", "ゲーム"},
 	"プロダクト/事例":    {"case study", "事例", "導入", "product", "プロダクト", "release", "launch"},
-	"組織/キャリア":     {"team", "organization", "career", "採用", "組織", "チーム", "マネジメント"},
 	"デザイン/UX":     {"design", "ux", "ui", "figma", "デザイン", "ユーザー体験"},
 }
 
