@@ -60,7 +60,7 @@ feeds:
     url: https://www.anthropic.com/news
 
   - id: "9869566727157"
-    name: 'ArXiv Query: search_query=all:"AI agent"&id_list=&start=0&max_results=10'
+    name: 'ArXiv: AI agent'
     type: atom
     url: 'https://export.arxiv.org/api/query?search_query=all:%22AI%20agent%22&sortBy=submittedDate&sortOrder=descending'
 

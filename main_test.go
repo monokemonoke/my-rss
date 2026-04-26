@@ -81,3 +81,17 @@ func TestFallbackArticleTagsReturnsExactlyThreeTags(t *testing.T) {
 		t.Fatalf("len = %d, want %d: %#v", len(got), requiredArticleTagCount, got)
 	}
 }
+
+func TestDisplaySourceNameShortensArxivQuerySource(t *testing.T) {
+	source := `ArXiv Query: search_query=all:"AI agent"&id_list=&start=0&max_results=10`
+	if got := displaySourceName(source); got != "ArXiv: AI agent" {
+		t.Fatalf("displaySourceName = %q, want ArXiv: AI agent", got)
+	}
+}
+
+func TestDisplaySourceNameShortensArxivQuerySourceInJoinedSources(t *testing.T) {
+	source := `Zenn / ArXiv Query: search_query=all:"AI agent"&id_list=&start=0&max_results=10`
+	if got := displaySourceName(source); got != "Zenn / ArXiv: AI agent" {
+		t.Fatalf("displaySourceName = %q, want Zenn / ArXiv: AI agent", got)
+	}
+}

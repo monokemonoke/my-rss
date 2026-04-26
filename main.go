@@ -248,6 +248,33 @@ var articleTagKeywords = map[string][]string{
 	"デザイン/UX":     {"design", "ux", "ui", "figma", "デザイン", "ユーザー体験"},
 }
 
+var reArxivQuerySource = regexp.MustCompile(`^ArXiv Query:\s*search_query=all:"([^"]+)".*`)
+
+func displaySourceName(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return ""
+	}
+
+	parts := strings.Split(source, " / ")
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if match := reArxivQuerySource.FindStringSubmatch(part); len(match) == 2 {
+			parts[i] = "ArXiv: " + match[1]
+		} else {
+			parts[i] = part
+		}
+	}
+	return strings.Join(parts, " / ")
+}
+
+func normalizeArticleSources(articles []Article) []Article {
+	for i := range articles {
+		articles[i].Source = displaySourceName(articles[i].Source)
+	}
+	return articles
+}
+
 func configuredArticleTags(cfg *Config) []string {
 	if cfg == nil || len(cfg.Tags) == 0 {
 		return append([]string(nil), defaultArticleTags...)
@@ -1253,6 +1280,7 @@ func main() {
 			log.Fatalf("load intermediate data: %v", err)
 		}
 		renderData.SchemaVersion = 2
+		renderData.Articles = normalizeArticleSources(renderData.Articles)
 		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, time.Now())
 		renderData.Articles = ensureArticleTags(renderData.Articles, allowedTags)
 		renderData.Sources = collectSources(renderData.Articles)
@@ -1327,6 +1355,7 @@ func main() {
 	// 同一URL記事を統合
 	before := len(allArticles)
 	allArticles = deduplicateArticles(allArticles)
+	allArticles = normalizeArticleSources(allArticles)
 	log.Printf("After dedup: %d articles (removed %d duplicates)", len(allArticles), before-len(allArticles))
 
 	before = len(allArticles)
