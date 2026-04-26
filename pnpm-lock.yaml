@@ -8,17 +8,18 @@ importers:
 
   .:
     dependencies:
-      '@vitejs/plugin-react':
-        specifier: latest
-        version: 6.0.1(vite@8.0.10)
       react:
-        specifier: latest
+        specifier: ^19.2.5
         version: 19.2.5
       react-dom:
-        specifier: latest
+        specifier: ^19.2.5
         version: 19.2.5(react@19.2.5)
+    devDependencies:
+      '@vitejs/plugin-react':
+        specifier: ^6.0.1
+        version: 6.0.1(vite@8.0.10)
       vite:
-        specifier: latest
+        specifier: ^8.0.10
         version: 8.0.10
 
 packages:
