@@ -849,21 +849,28 @@ func saveRenderData(path string, renderData RenderData) error {
 func renderHTML(path string, renderData RenderData) error {
 	funcMap := template.FuncMap{
 		"scoreClass": scoreClass,
+		"dateLabel":  dateLabel,
 	}
 	tmpl := template.Must(template.New("feed").Funcs(funcMap).Parse(htmlTmpl))
+	articlesJSON, err := json.Marshal(renderData.Articles)
+	if err != nil {
+		return err
+	}
 
 	data := struct {
-		Date     string
-		Articles []Article
-		Sources  []string
-		CSS      template.CSS
-		JS       template.JS
+		Date         string
+		Articles     []Article
+		Sources      []string
+		ArticlesJSON template.JS
+		CSS          template.CSS
+		JS           template.JS
 	}{
-		Date:     renderData.Date,
-		Articles: renderData.Articles,
-		Sources:  renderData.Sources,
-		CSS:      template.CSS(cssContent),
-		JS:       template.JS(jsContent),
+		Date:         renderData.Date,
+		Articles:     renderData.Articles,
+		Sources:      renderData.Sources,
+		ArticlesJSON: template.JS(articlesJSON),
+		CSS:          template.CSS(cssContent),
+		JS:           template.JS(jsContent),
 	}
 
 	f, err := os.Create(path)
@@ -887,6 +894,14 @@ func scoreClass(score int) string {
 	default:
 		return "score-none"
 	}
+}
+
+func dateLabel(raw string) string {
+	t, ok := parseArticleDate(raw)
+	if !ok {
+		return strings.TrimSpace(raw)
+	}
+	return t.In(time.Local).Format("2006-01-02")
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────

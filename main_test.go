@@ -34,3 +34,9 @@ func TestFilterRecentArticlesKeepsOnlyRecentDatedArticles(t *testing.T) {
 		t.Fatalf("titles = %q, %q; want recent, undated", got[0].Title, got[1].Title)
 	}
 }
+
+func TestDateLabelFormatsArticleDate(t *testing.T) {
+	if got := dateLabel("2026-04-23T11:00:00Z"); got != "2026-04-23" {
+		t.Fatalf("dateLabel = %q, want 2026-04-23", got)
+	}
+}

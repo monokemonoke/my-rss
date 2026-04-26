@@ -13,40 +13,41 @@ header { padding: var(--space-3); border-bottom: 1px solid var(--border); displa
 header h1 { font-size: 17px; font-weight: 700; color: var(--accent); }
 header span { color: var(--muted); font-size: 12px; }
 
-/* ── card grid ── */
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--space-3); padding: var(--space-3); background: var(--bg); }
+/* ── virtual card grid ── */
+.virtual-grid { position: relative; margin: var(--space-3); background: var(--bg); }
 
 /* ── card ── */
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; cursor: default; transition: background .12s; }
+.card { position: absolute; top: 0; left: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; cursor: default; transition: background .12s; will-change: transform; }
 .card:hover { background: var(--surface2); }
-.card.selected { background: var(--surface2); outline: 2px solid var(--accent); outline-offset: -2px; position: relative; z-index: 1; }
+.card.selected { background: var(--surface2); outline: 2px solid var(--accent); outline-offset: -2px; z-index: 1; }
 
 .card-thumb { width: 100%; aspect-ratio: 16/9; overflow: hidden; background: var(--surface2); flex-shrink: 0; }
 .card-thumb a { display: block; width: 100%; height: 100%; }
 .card-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform .2s; }
 .card:hover .card-thumb img { transform: scale(1.03); }
-.card-no-thumb { width: 100%; aspect-ratio: 16/9; background: linear-gradient(135deg, var(--surface2), var(--border)); display: flex; align-items: center; justify-content: center; }
+.card-no-thumb { width: 100%; aspect-ratio: 16/9; background: linear-gradient(135deg, var(--surface2), var(--border)); color: inherit; text-decoration: none; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .card-no-thumb .score-big { font-size: 28px; font-weight: 800; }
 
-.card-body { padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-1); flex: 1; }
+.card-body { min-height: 0; padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-1); flex: 1; }
 
 .card-title { font-size: 13px; font-weight: 600; line-height: 1.4; color: var(--text); }
-.card-title a { color: inherit; text-decoration: none; }
+.card-title a { color: inherit; text-decoration: none; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .card-title a:hover { color: var(--link); }
-.card-title-orig { font-size: 10px; color: var(--muted); margin-top: var(--space-1); line-height: 1.3; }
+.card-title-orig { font-size: 10px; color: var(--muted); margin-top: var(--space-1); line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
-.card-meta { display: flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; }
+.card-meta { display: flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; margin-top: auto; }
 .score-badge { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 10px; flex-shrink: 0; }
 .score-high { background: #E8F1FE; color: var(--green); }
 .score-mid  { background: #F2F2F2; color: var(--yellow); }
 .score-low  { background: #FDEEEE; color: var(--red); }
 .score-none { background: #F2F2F2; color: var(--muted); }
 .source-tag { font-size: 10px; background: var(--surface2); color: var(--accent); padding: 1px 7px; border-radius: 10px; }
+.published-date { font-size: 10px; color: var(--muted); }
 .hn-score { font-size: 10px; color: var(--muted); }
 
 @media (max-width: 640px) {
   .wrap { padding-bottom: var(--space-3); }
   header { padding: var(--space-2); }
-  .grid { gap: var(--space-2); padding: var(--space-2); }
+  .virtual-grid { margin: var(--space-2); }
   .card-body { padding: var(--space-2); }
 }

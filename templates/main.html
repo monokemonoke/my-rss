@@ -13,27 +13,11 @@
   <h1>⚡ KijiYomu</h1>
   <span>{{.Date}} — {{len .Articles}} 件</span>
 </header>
-<div class="grid" id="articles">
-{{range .Articles}}
-<div class="card" data-source="{{.Source}}" data-score="{{.AIScore}}" data-url="{{.URL}}">
-  {{if .OGImage}}
-  <div class="card-thumb"><a href="{{.URL}}" target="_blank" rel="noopener"><img src="{{.OGImage}}" alt="" loading="lazy" onerror="this.closest('.card-thumb').replaceWith(Object.assign(document.createElement('div'),{className:'card-no-thumb',innerHTML:'<span class=\'score-big {{scoreClass .AIScore}}\'>{{if gt .AIScore 0}}{{.AIScore}}{{else}}?{{end}}</span>'}))"></a></div>
-  {{else}}
-  <div class="card-no-thumb"><span class="score-big {{scoreClass .AIScore}}">{{if gt .AIScore 0}}{{.AIScore}}{{else}}?{{end}}</span></div>
-  {{end}}
-  <div class="card-body">
-    <div class="card-title"><a href="{{.URL}}" target="_blank" rel="noopener">{{if .TitleJA}}{{.TitleJA}}{{else}}{{.Title}}{{end}}</a></div>
-    {{if .TitleJA}}<div class="card-title-orig">{{.Title}}</div>{{end}}
-    <div class="card-meta">
-      {{if gt .AIScore 0}}<span class="score-badge {{scoreClass .AIScore}}">{{.AIScore}}</span>{{end}}
-      <span class="source-tag">{{.Source}}</span>
-      {{if gt .Score 0}}<span class="hn-score">▲{{.Score}}</span>{{end}}
-    </div>
-  </div>
+<div id="articles-root"></div>
 </div>
-{{end}}
-</div>
-</div>
+<script id="articles-data" type="application/json">{{.ArticlesJSON}}</script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 <script>{{.JS}}</script>
 </body>
 </html>
