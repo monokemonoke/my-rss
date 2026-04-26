@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
@@ -22,7 +21,6 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	openai "github.com/sashabaranov/go-openai"
 	"gopkg.in/yaml.v3"
 )
 
@@ -44,14 +42,10 @@ var faviconPNG []byte
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
 var CLI struct {
-	APIBase   string `help:"OpenAI-compatible API host URL (e.g. https://api.example.com)" env:"AI_API_BASE"`
-	APIKey    string `help:"API key (optional)" env:"AI_API_KEY"`
-	Model     string `help:"Model name" env:"AI_MODEL" default:"gpt-4o-mini"`
 	Out       string `help:"Output HTML file" default:"kijiyomu.html"`
-	DataIn    string `help:"Read intermediate JSON and render HTML without fetching/scoring"`
-	DataOut   string `help:"Write intermediate JSON after fetching/scoring"`
-	MinScore  int    `help:"Minimum AI score to include (0=include all)" default:"0"`
-	CacheFile string `help:"Cache file for AI scores" default:".kijiyomu_cache.json"`
+	DataIn    string `help:"Read intermediate JSON and render HTML without fetching"`
+	DataOut   string `help:"Write intermediate JSON after fetching"`
+	CacheFile string `help:"Cache file for OG images" default:".kijiyomu_cache.json"`
 	Config    string `help:"Feed config YAML file" default:"kijiyomu.yaml"`
 }
 
@@ -66,8 +60,7 @@ type FeedConfig struct {
 }
 
 type Config struct {
-	Profile string       `yaml:"profile"`
-	Feeds   []FeedConfig `yaml:"feeds"`
+	Feeds []FeedConfig `yaml:"feeds"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -86,12 +79,9 @@ func loadConfig(path string) (*Config, error) {
 
 type Article struct {
 	Title   string `json:"title"`
-	TitleJA string `json:"title_ja,omitempty"` // 日本語タイトル（英語記事の場合に設定）
 	URL     string `json:"url"`
 	Source  string `json:"source"`
 	Score   int    `json:"score,omitempty"`    // points/bookmarks
-	AIScore int    `json:"ai_score,omitempty"` // 0-100 from LLM
-	Reason  string `json:"reason,omitempty"`   // LLM explanation
 	OGImage string `json:"og_image,omitempty"` // og:image URL
 	Date    string `json:"date,omitempty"`     // RFC3339 published date
 }
@@ -155,18 +145,9 @@ type HNStory struct {
 	Time  int64  `json:"time"`
 }
 
-type AIResult struct {
-	Score   int    `json:"score"`
-	Reason  string `json:"reason"`
-	TitleJA string `json:"title_ja,omitempty"`
-}
-
 // ─── Cache ────────────────────────────────────────────────────────────────────
 
 type CacheEntry struct {
-	AIScore int    `json:"ai_score,omitempty"`
-	Reason  string `json:"reason,omitempty"`
-	TitleJA string `json:"title_ja,omitempty"`
 	OGImage string `json:"og_image,omitempty"` // og:image URL ("-" = not found)
 }
 
@@ -676,130 +657,6 @@ func fetchOGImages(articles []Article, cache *Cache) []Article {
 	return articles
 }
 
-// ─── AI client ────────────────────────────────────────────────────────────────
-
-// cleanAPIBase はパスを除いてスキーム+ホストだけを返す
-// 例: https://host/v1/chat/completions → https://host
-func cleanAPIBase(apiBase string) string {
-	if u, err := url.Parse(apiBase); err == nil && u.Host != "" {
-		return u.Scheme + "://" + u.Host
-	}
-	return apiBase
-}
-
-func newAIClient(apiBase, apiKey string) *openai.Client {
-	cfg := openai.DefaultConfig(apiKey)
-	if apiBase != "" {
-		base := cleanAPIBase(apiBase)
-		cfg.BaseURL = base + "/v1"
-		log.Printf("[INFO] AI base URL: %s", cfg.BaseURL)
-	}
-	return openai.NewClientWithConfig(cfg)
-}
-
-// callAI は OpenAI互換 API に単発リクエストを投げてテキストを返す
-func callAI(client *openai.Client, model, system, userMsg string) (string, error) {
-	resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
-		Model: model,
-		Messages: []openai.ChatCompletionMessage{
-			{Role: openai.ChatMessageRoleSystem, Content: system},
-			{Role: openai.ChatMessageRoleUser, Content: userMsg},
-		},
-	})
-	if err != nil {
-		return "", err
-	}
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("empty response")
-	}
-	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
-}
-
-// ─── AI scoring ───────────────────────────────────────────────────────────────
-
-func buildSystemPrompt(profile string) string {
-	return `あなたは技術記事のレコメンドエンジンです。
-以下のユーザープロフィールに基づいて、各記事タイトルに興味スコア(0-100)を付けてください。
-
-## ユーザープロフィール
-` + profile + `
-
-## 出力形式
-必ずJSON配列のみ返すこと。説明文・前置き・コードブロック記法は不要。
-title_ja は元タイトルが英語の場合は日本語に翻訳し、日本語の場合はそのままコピーすること。
-[
-  {"score": 85, "reason": "Rustの非同期ランタイムに関する記事", "title_ja": "Rustの非同期ランタイム詳解"},
-  {"score": 10, "reason": "政治ニュースのため", "title_ja": "〇〇の政治情勢"}
-]`
-}
-
-func scoreArticlesWithAI(articles []Article, client *openai.Client, model string, batchSize int, cache *Cache, systemPrompt string) []Article {
-	if client == nil {
-		log.Println("[INFO] AI client not configured, skipping AI scoring")
-		return articles
-	}
-
-	// キャッシュ適用・未スコアのインデックスを収集
-	uncached := make([]int, 0, len(articles))
-	for i := range articles {
-		if e, ok := cache.get(articles[i].URL); ok && e.AIScore > 0 {
-			articles[i].AIScore = e.AIScore
-			articles[i].Reason = e.Reason
-			articles[i].TitleJA = e.TitleJA
-		} else {
-			uncached = append(uncached, i)
-		}
-	}
-	log.Printf("  scoring %d articles (cached: %d)", len(uncached), len(articles)-len(uncached))
-
-	for bStart := 0; bStart < len(uncached); bStart += batchSize {
-		bEnd := bStart + batchSize
-		if bEnd > len(uncached) {
-			bEnd = len(uncached)
-		}
-		batch := uncached[bStart:bEnd]
-
-		var titlesBuilder strings.Builder
-		for i, idx := range batch {
-			fmt.Fprintf(&titlesBuilder, "%d. %s\n", i+1, articles[idx].Title)
-		}
-
-		content, err := callAI(client, model, systemPrompt, "以下の記事タイトルを評価してください:\n\n"+titlesBuilder.String())
-		if err != nil {
-			log.Printf("[WARN] AI API error: %v", err)
-			continue
-		}
-
-		content = strings.TrimSpace(content)
-		content = strings.TrimPrefix(content, "```json")
-		content = strings.TrimPrefix(content, "```")
-		content = strings.TrimSuffix(content, "```")
-
-		var results []AIResult
-		if err := json.Unmarshal([]byte(content), &results); err != nil {
-			log.Printf("[WARN] AI JSON parse error: %v\ncontent: %s", err, content)
-			continue
-		}
-		for i, r := range results {
-			if i >= len(batch) {
-				break
-			}
-			idx := batch[i]
-			articles[idx].AIScore = r.Score
-			articles[idx].Reason = r.Reason
-			articles[idx].TitleJA = r.TitleJA
-			e, _ := cache.get(articles[idx].URL)
-			e.AIScore = r.Score
-			e.Reason = r.Reason
-			e.TitleJA = r.TitleJA
-			cache.set(articles[idx].URL, e)
-		}
-
-		time.Sleep(500 * time.Millisecond)
-	}
-	return articles
-}
-
 // ─── HTML output ──────────────────────────────────────────────────────────────
 
 func collectSources(articles []Article) []string {
@@ -813,19 +670,6 @@ func collectSources(articles []Article) []string {
 	}
 	sort.Strings(sources)
 	return sources
-}
-
-func filterArticlesByMinScore(articles []Article, minScore int) []Article {
-	if minScore <= 0 {
-		return articles
-	}
-	filtered := articles[:0]
-	for _, a := range articles {
-		if a.AIScore >= minScore {
-			filtered = append(filtered, a)
-		}
-	}
-	return filtered
 }
 
 func loadRenderData(path string) (*RenderData, error) {
@@ -856,8 +700,7 @@ func saveRenderData(path string, renderData RenderData) error {
 
 func renderHTML(path string, renderData RenderData) error {
 	funcMap := template.FuncMap{
-		"scoreClass": scoreClass,
-		"dateLabel":  dateLabel,
+		"dateLabel": dateLabel,
 	}
 	tmpl := template.Must(template.New("feed").Funcs(funcMap).Parse(htmlTmpl))
 	articlesJSON, err := json.Marshal(renderData.Articles)
@@ -977,19 +820,6 @@ func writePWAFiles(outHTMLPath string) error {
 
 // ─── Template helpers ─────────────────────────────────────────────────────────
 
-func scoreClass(score int) string {
-	switch {
-	case score >= 70:
-		return "score-high"
-	case score >= 40:
-		return "score-mid"
-	case score > 0:
-		return "score-low"
-	default:
-		return "score-none"
-	}
-}
-
 func dateLabel(raw string) string {
 	t, ok := parseArticleDate(raw)
 	if !ok {
@@ -1009,7 +839,6 @@ func main() {
 			log.Fatalf("load intermediate data: %v", err)
 		}
 		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, time.Now())
-		renderData.Articles = filterArticlesByMinScore(renderData.Articles, CLI.MinScore)
 		renderData.Sources = collectSources(renderData.Articles)
 		if CLI.DataOut != "" {
 			if err := saveRenderData(CLI.DataOut, *renderData); err != nil {
@@ -1028,11 +857,6 @@ func main() {
 	}
 
 	cache := loadCache(CLI.CacheFile)
-
-	var aiClient *openai.Client
-	if CLI.APIBase != "" {
-		aiClient = newAIClient(CLI.APIBase, CLI.APIKey)
-	}
 
 	log.Println("Fetching articles...")
 
@@ -1102,20 +926,6 @@ func main() {
 	// OG image fetch (all articles, cached)
 	log.Println("Fetching OG images...")
 	allArticles = fetchOGImages(allArticles, cache)
-
-	// AI scoring
-	if aiClient != nil {
-		log.Printf("Scoring with AI (model: %s)...", CLI.Model)
-		var profile string
-		if feedCfg != nil {
-			profile = strings.TrimSpace(feedCfg.Profile)
-		}
-		allArticles = scoreArticlesWithAI(allArticles, aiClient, CLI.Model, 20, cache, buildSystemPrompt(profile))
-		sort.Slice(allArticles, func(i, j int) bool {
-			return allArticles[i].AIScore > allArticles[j].AIScore
-		})
-		allArticles = filterArticlesByMinScore(allArticles, CLI.MinScore)
-	}
 
 	cache.save()
 
