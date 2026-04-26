@@ -16,8 +16,8 @@ function hashInt(str) {
 }
 
 const CARD_MIN_WIDTH = 280;
-const CARD_HEIGHT_DESKTOP = 150;
-const CARD_HEIGHT_MOBILE = 130;
+const CARD_HEIGHT_DESKTOP = 190;
+const CARD_HEIGHT_MOBILE = 170;
 const OVERSCAN_ROWS = 3;
 
 function readArticles() {
@@ -92,9 +92,8 @@ function Thumb({ article }) {
 }
 
 function ArticleCard({ article, index, selected, style }) {
-  const score = article.ai_score || 0;
-  const title = article.title_ja || article.title || '';
-  const originalTitle = article.title_ja ? article.title : '';
+  const title = article.title || '';
+  const bullets = Array.isArray(article.summary) ? article.summary : [];
 
   return h(
     'article',
@@ -103,7 +102,6 @@ function ArticleCard({ article, index, selected, style }) {
       style,
       'data-index': index,
       'data-source': article.source,
-      'data-score': score,
       'data-url': article.url,
     },
     h(Thumb, { article }),
@@ -116,10 +114,11 @@ function ArticleCard({ article, index, selected, style }) {
         { className: 'card-meta' },
         h('span', { className: 'source-tag' }, article.source),
         article.date ? h('time', { className: 'published-date', dateTime: article.date }, dateLabel(article.date)) : null,
-        score > 0 ? h('span', { className: `score-badge ${scoreClass(score)}` }, score) : null,
         article.score > 0 ? h('span', { className: 'hn-score' }, `▲${article.score}`) : null
       ),
-      h('div', { className: 'card-summary' }, 'ほげほげほげほげほげほげ。ほげほげほげほげほげほげほげほげ。ほげほげほげほげほげほげほげほげほげ。')
+      bullets.length > 0
+        ? h('ul', { className: 'card-summary' }, ...bullets.map((b, i) => h('li', { key: i }, b)))
+        : null
     )
   );
 }
