@@ -1156,7 +1156,8 @@ func loadRenderData(path string) (*RenderData, error) {
 		renderData.Sources = collectSources(renderData.Articles)
 	}
 	if renderData.Date == "" {
-		renderData.Date = time.Now().Format("2006-01-02 15:04")
+		jst := time.FixedZone("JST", 9*60*60)
+		renderData.Date = time.Now().In(jst).Format("2006-01-02 15:04")
 	}
 	return &renderData, nil
 }
@@ -1433,7 +1434,7 @@ func main() {
 
 	renderData := RenderData{
 		SchemaVersion: 2,
-		Date:          time.Now().Format("2006-01-02 15:04"),
+		Date:          time.Now().In(time.FixedZone("JST", 9*60*60)).Format("2006-01-02 15:04"),
 		Articles:      allArticles,
 		Sources:       collectSources(allArticles),
 	}
