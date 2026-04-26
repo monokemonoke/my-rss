@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	openai "github.com/sashabaranov/go-openai"
 	"gopkg.in/yaml.v3"
 )
 
@@ -42,10 +44,13 @@ var faviconPNG []byte
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
 var CLI struct {
+	APIBase   string `help:"OpenAI-compatible API host URL" env:"AI_API_BASE"`
+	APIKey    string `help:"API key (optional)" env:"AI_API_KEY"`
+	Model     string `help:"Model name" env:"AI_MODEL" default:"gpt-4o-mini"`
 	Out       string `help:"Output HTML file" default:"kijiyomu.html"`
 	DataIn    string `help:"Read intermediate JSON and render HTML without fetching"`
 	DataOut   string `help:"Write intermediate JSON after fetching"`
-	CacheFile string `help:"Cache file for OG images" default:".kijiyomu_cache.json"`
+	CacheFile string `help:"Cache file" default:".kijiyomu_cache.json"`
 	Config    string `help:"Feed config YAML file" default:"kijiyomu.yaml"`
 }
 
@@ -78,12 +83,13 @@ func loadConfig(path string) (*Config, error) {
 // ─── Data types ───────────────────────────────────────────────────────────────
 
 type Article struct {
-	Title   string `json:"title"`
-	URL     string `json:"url"`
-	Source  string `json:"source"`
-	Score   int    `json:"score,omitempty"`    // points/bookmarks
-	OGImage string `json:"og_image,omitempty"` // og:image URL
-	Date    string `json:"date,omitempty"`     // RFC3339 published date
+	Title   string   `json:"title"`
+	URL     string   `json:"url"`
+	Source  string   `json:"source"`
+	Score   int      `json:"score,omitempty"`    // points/bookmarks
+	OGImage string   `json:"og_image,omitempty"` // og:image URL
+	Date    string   `json:"date,omitempty"`     // RFC3339 published date
+	Summary []string `json:"summary,omitempty"`  // 3-bullet Japanese summary
 }
 
 type RenderData struct {
@@ -148,7 +154,8 @@ type HNStory struct {
 // ─── Cache ────────────────────────────────────────────────────────────────────
 
 type CacheEntry struct {
-	OGImage string `json:"og_image,omitempty"` // og:image URL ("-" = not found)
+	OGImage string   `json:"og_image,omitempty"` // og:image URL ("-" = not found)
+	Summary []string `json:"summary,omitempty"`  // 3-bullet Japanese summary
 }
 
 type Cache struct {
@@ -657,6 +664,136 @@ func fetchOGImages(articles []Article, cache *Cache) []Article {
 	return articles
 }
 
+// ─── AI client ────────────────────────────────────────────────────────────────
+
+func cleanAPIBase(apiBase string) string {
+	if u, err := url.Parse(apiBase); err == nil && u.Host != "" {
+		return u.Scheme + "://" + u.Host
+	}
+	return apiBase
+}
+
+func newAIClient(apiBase, apiKey string) *openai.Client {
+	cfg := openai.DefaultConfig(apiKey)
+	if apiBase != "" {
+		base := cleanAPIBase(apiBase)
+		cfg.BaseURL = base + "/v1"
+		log.Printf("[INFO] AI base URL: %s", cfg.BaseURL)
+	}
+	return openai.NewClientWithConfig(cfg)
+}
+
+func callAI(client *openai.Client, model, system, userMsg string) (string, error) {
+	resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
+		Model: model,
+		Messages: []openai.ChatCompletionMessage{
+			{Role: openai.ChatMessageRoleSystem, Content: system},
+			{Role: openai.ChatMessageRoleUser, Content: userMsg},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("empty response")
+	}
+	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+}
+
+// ─── AI summarization ─────────────────────────────────────────────────────────
+
+// stripHTML はHTMLタグ・スクリプト・スタイルを除去してプレーンテキストを返す
+func stripHTML(s string) string {
+	reBlock := regexp.MustCompile(`(?is)<(script|style)[^>]*>.*?</\1>`)
+	s = reBlock.ReplaceAllString(s, " ")
+	reTag := regexp.MustCompile(`<[^>]+>`)
+	s = reTag.ReplaceAllString(s, " ")
+	s = stdhtml.UnescapeString(s)
+	reSpace := regexp.MustCompile(`\s+`)
+	return strings.TrimSpace(reSpace.ReplaceAllString(s, " "))
+}
+
+// fetchArticleText は記事ページのプレーンテキストを取得する
+func fetchArticleText(rawURL string) string {
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; kijiyomu/1.0)")
+	req.Header.Set("Accept", "text/html")
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	return stripHTML(string(body))
+}
+
+const summarizeSystemPrompt = `あなたは記事の要約専門アシスタントです。
+与えられた記事の内容を日本語で3点の箇条書きにまとめてください。
+必ずJSON配列のみ返すこと。説明文・前置き・コードブロック記法は不要。
+例: ["要点1の説明", "要点2の説明", "要点3の説明"]`
+
+// summarizeArticles は全記事の要約を並列生成する（キャッシュ済みはスキップ）
+func summarizeArticles(articles []Article, client *openai.Client, model string, cache *Cache) []Article {
+	uncached := make([]int, 0, len(articles))
+	for i := range articles {
+		if e, ok := cache.get(articles[i].URL); ok && len(e.Summary) > 0 {
+			articles[i].Summary = e.Summary
+		} else {
+			uncached = append(uncached, i)
+		}
+	}
+	log.Printf("  summarizing %d articles (cached: %d)", len(uncached), len(articles)-len(uncached))
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 3) // AI API への同時リクエスト数を制限
+
+	for _, idx := range uncached {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			a := &articles[i]
+			text := fetchArticleText(a.URL)
+			const maxTextLen = 4000
+			if len([]rune(text)) > maxTextLen {
+				runes := []rune(text)
+				text = string(runes[:maxTextLen])
+			}
+
+			prompt := fmt.Sprintf("タイトル: %s\n\n本文:\n%s", a.Title, text)
+			content, err := callAI(client, model, summarizeSystemPrompt, prompt)
+			if err != nil {
+				log.Printf("[WARN] summarize %s: %v", a.URL, err)
+				return
+			}
+
+			content = strings.TrimSpace(content)
+			content = strings.TrimPrefix(content, "```json")
+			content = strings.TrimPrefix(content, "```")
+			content = strings.TrimSuffix(content, "```")
+
+			var bullets []string
+			if err := json.Unmarshal([]byte(content), &bullets); err != nil {
+				log.Printf("[WARN] summarize JSON parse %s: %v", a.URL, err)
+				return
+			}
+
+			a.Summary = bullets
+			e, _ := cache.get(a.URL)
+			e.Summary = bullets
+			cache.set(a.URL, e)
+		}(idx)
+	}
+	wg.Wait()
+	return articles
+}
+
 // ─── HTML output ──────────────────────────────────────────────────────────────
 
 func collectSources(articles []Article) []string {
@@ -858,6 +995,11 @@ func main() {
 
 	cache := loadCache(CLI.CacheFile)
 
+	var aiClient *openai.Client
+	if CLI.APIBase != "" {
+		aiClient = newAIClient(CLI.APIBase, CLI.APIKey)
+	}
+
 	log.Println("Fetching articles...")
 
 	type fetchJob struct {
@@ -926,6 +1068,12 @@ func main() {
 	// OG image fetch (all articles, cached)
 	log.Println("Fetching OG images...")
 	allArticles = fetchOGImages(allArticles, cache)
+
+	// AI summarization
+	if aiClient != nil {
+		log.Printf("Summarizing with AI (model: %s)...", CLI.Model)
+		allArticles = summarizeArticles(allArticles, aiClient, CLI.Model, cache)
+	}
 
 	cache.save()
 
