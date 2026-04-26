@@ -27,21 +27,20 @@ header span { color: var(--muted); font-size: 12px; }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--space-3); margin: var(--space-3); }
 
 /* ── card ── */
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: row; cursor: default; transition: background .12s; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; cursor: default; transition: background .12s; }
 .card:hover { background: var(--surface2); }
-.card.selected { background: var(--surface2); outline: 2px solid var(--accent); outline-offset: -2px; z-index: 1; }
 
-.card-thumb { width: 30%; flex-shrink: 0; min-height: 110px; overflow: hidden; background: var(--surface2); }
+.card-thumb { width: 100%; aspect-ratio: 16/9; overflow: hidden; background: var(--surface2); }
 .card-thumb a { display: block; width: 100%; height: 100%; }
 .card-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform .2s; }
 .card:hover .card-thumb img { transform: scale(1.03); }
-.card-no-thumb { width: 30%; flex-shrink: 0; min-height: 110px; background: linear-gradient(135deg, var(--surface2), var(--border)); color: inherit; text-decoration: none; display: flex; align-items: center; justify-content: center; }
-.card-no-thumb .twemoji-thumb { width: 40px; height: 40px; pointer-events: none; }
+.card-no-thumb { width: 100%; aspect-ratio: 16/9; background: linear-gradient(135deg, var(--surface2), var(--border)); color: inherit; text-decoration: none; display: flex; align-items: center; justify-content: center; }
+.card-no-thumb .twemoji-thumb { width: 48px; height: 48px; pointer-events: none; }
 
-.card-body { min-height: 0; padding: 12px var(--space-2); display: flex; flex-direction: column; gap: 6px; flex: 1; overflow: hidden; }
+.card-body { padding: 12px var(--space-2); display: flex; flex-direction: column; gap: 6px; }
 
 .card-title { font-size: 13px; font-weight: 600; line-height: 1.4; color: var(--text); }
-.card-title a { color: inherit; text-decoration: none; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card-title a { color: inherit; text-decoration: none; }
 .card-title a:hover { color: var(--link); }
 
 .card-meta { display: flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; }
