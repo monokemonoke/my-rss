@@ -89,9 +89,9 @@ feeds:
     type: atom
     url: https://qiita.com/popular-items/feed
 
-  - name: Reddit r/rust
-    type: reddit
-    subreddit: rust
+  - name: Anthropic News
+    type: anthropic
+    url: https://www.anthropic.com/news
 
   - name: Google さくらインターネット
     type: rss
@@ -106,15 +106,13 @@ feeds:
 | `rss` | RSS 2.0 |
 | `atom` | Atom |
 | `rdf` | RDF/RSS 1.0（はてなブックマーク等） |
-| `reddit` | Reddit JSON API（`subreddit` フィールドが必要） |
+| `anthropic` | Anthropic News ページ |
 
 ## HTML の機能
 
 - **カードグリッド表示** — OG イメージ付きのカード形式
-- **ソース別フィルタ** — ボタンでソースを絞り込み
-- **スコアフィルタ** — AI スコアの下限をリアルタイムで変更
-- **既読管理** — スクロールで通り過ぎた記事は自動でグレーアウト、リロード後は下に移動（localStorage、7日で自動削除）
-- **キーボードナビ** — `H`/`J`/`K`/`L` で移動、`Enter` で開く
+- **キーボード操作** — `j`/`k`/`h`/`l` でカード移動、Enter で記事を開く
+- **直近記事のみ表示** — 公開日が取れる記事は直近2か月分に絞り込み
 - **重複排除** — 同一 URL の記事は複数ソースをまとめて表示
 
 ## GitHub Actions による自動実行

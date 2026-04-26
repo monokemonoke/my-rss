@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	stdhtml "html"
 	"html/template"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -48,12 +50,11 @@ var CLI struct {
 // ─── Feed config ───────────────────────────────────────────────────────────────
 
 type FeedConfig struct {
-	ID        string `yaml:"id"`
-	Name      string `yaml:"name"`
-	Type      string `yaml:"type"` // hn, rss, atom, rdf, reddit
-	URL       string `yaml:"url"`
-	Subreddit string `yaml:"subreddit"` // for type: reddit
-	Limit     int    `yaml:"limit"`     // for type: hn (default: 50)
+	ID    string `yaml:"id"`
+	Name  string `yaml:"name"`
+	Type  string `yaml:"type"` // hn, rss, atom, rdf, anthropic
+	URL   string `yaml:"url"`
+	Limit int    `yaml:"limit"` // for type: hn (default: 50)
 }
 
 type Config struct {
@@ -84,6 +85,7 @@ type Article struct {
 	AIScore int    `json:"ai_score,omitempty"` // 0-100 from LLM
 	Reason  string `json:"reason,omitempty"`   // LLM explanation
 	OGImage string `json:"og_image,omitempty"` // og:image URL
+	Date    string `json:"date,omitempty"`     // RFC3339 published date
 }
 
 type RenderData struct {
@@ -102,8 +104,12 @@ type RSSFeed struct {
 }
 
 type RSSItem struct {
-	Title string `xml:"title"`
-	Link  string `xml:"link"`
+	Title     string `xml:"title"`
+	Link      string `xml:"link"`
+	PubDate   string `xml:"pubDate"`
+	Date      string `xml:"date"`
+	Published string `xml:"published"`
+	Updated   string `xml:"updated"`
 }
 
 type AtomFeed struct {
@@ -111,8 +117,10 @@ type AtomFeed struct {
 }
 
 type AtomEntry struct {
-	Title string `xml:"title"`
-	Link  struct {
+	Title     string `xml:"title"`
+	Published string `xml:"published"`
+	Updated   string `xml:"updated"`
+	Link      struct {
 		Href string `xml:"href,attr"`
 	} `xml:"link"`
 }
@@ -126,6 +134,7 @@ type RDFFeed struct {
 type RDFItem struct {
 	Title string `xml:"title"`
 	Link  string `xml:"link"`
+	Date  string `xml:"date"`
 }
 
 // HN API
@@ -135,6 +144,7 @@ type HNStory struct {
 	Title string `json:"title"`
 	URL   string `json:"url"`
 	Score int    `json:"score"`
+	Time  int64  `json:"time"`
 }
 
 type AIResult struct {
@@ -199,6 +209,58 @@ func (c *Cache) set(u string, entry CacheEntry) {
 
 // ─── Fetchers ─────────────────────────────────────────────────────────────────
 
+const recentArticleMonths = 2
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func formatArticleDate(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func parseArticleDate(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		time.RFC1123Z,
+		time.RFC1123,
+		time.RFC822Z,
+		time.RFC822,
+		"Mon, 02 Jan 2006 15:04:05 -0700",
+		"Mon, 02 Jan 2006 15:04:05 MST",
+		"Jan 2, 2006",
+		"January 2, 2006",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func articleDate(raw string) string {
+	t, ok := parseArticleDate(raw)
+	if !ok {
+		return ""
+	}
+	return formatArticleDate(t)
+}
+
 func fetchRSS(rawURL, source string) []Article {
 	resp, err := http.Get(rawURL)
 	if err != nil {
@@ -223,6 +285,7 @@ func fetchRSS(rawURL, source string) []Article {
 			Title:  strings.TrimSpace(item.Title),
 			URL:    strings.TrimSpace(link),
 			Source: source,
+			Date:   articleDate(firstNonEmpty(item.PubDate, item.Date, item.Published, item.Updated)),
 		})
 	}
 	return articles
@@ -248,6 +311,7 @@ func fetchAtom(rawURL, source string) []Article {
 			Title:  strings.TrimSpace(e.Title),
 			URL:    strings.TrimSpace(e.Link.Href),
 			Source: source,
+			Date:   articleDate(firstNonEmpty(e.Published, e.Updated)),
 		})
 	}
 	return articles
@@ -297,6 +361,7 @@ func fetchHN(limit int) []Article {
 				URL:    story.URL,
 				Source: "Hacker News",
 				Score:  story.Score,
+				Date:   formatArticleDate(time.Unix(story.Time, 0)),
 			}}
 		}(i, id)
 	}
@@ -333,41 +398,91 @@ func fetchRDF(rawURL, source string) []Article {
 			Title:  strings.TrimSpace(item.Title),
 			URL:    strings.TrimSpace(item.Link),
 			Source: source,
+			Date:   articleDate(item.Date),
 		})
 	}
 	return articles
 }
 
-func fetchRedditRSS(sub string) []Article {
-	rawURL := fmt.Sprintf("https://www.reddit.com/r/%s/.rss", sub)
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, _ := http.NewRequest("GET", rawURL, nil)
-	req.Header.Set("User-Agent", "kijiyomu/1.0 (personal RSS reader)")
+func fetchAnthropicNews(rawURL, source string) []Article {
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
+		log.Printf("[WARN] %s: %v", source, err)
+		return nil
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; kijiyomu/1.0)")
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[WARN] Reddit r/%s: %v", sub, err)
+		log.Printf("[WARN] %s: %v", source, err)
 		return nil
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
-
-	var feed AtomFeed
-	if err := xml.Unmarshal(body, &feed); err != nil {
-		log.Printf("[WARN] Reddit r/%s parse: %v", sub, err)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[WARN] %s: status %s", source, resp.Status)
 		return nil
 	}
-	source := "Reddit r/" + sub
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	page := string(body)
+
+	base, err := url.Parse(rawURL)
+	if err != nil {
+		log.Printf("[WARN] %s URL parse: %v", source, err)
+		return nil
+	}
+
+	type pattern struct {
+		link  *regexp.Regexp
+		title *regexp.Regexp
+	}
+	patterns := []pattern{
+		{
+			link:  regexp.MustCompile(`<a href="([^"]+)" class="[^"]*PublicationList[^"]*"[^>]*>(.*?)</a>`),
+			title: regexp.MustCompile(`<span class="[^"]*title[^"]*">([^<]+)</span>`),
+		},
+		{
+			link:  regexp.MustCompile(`<a href="([^"]+)" class="[^"]*FeaturedGrid[^"]*"[^>]*>(.*?)</a>`),
+			title: regexp.MustCompile(`<h[2-4][^>]*>([^<]+)</h[2-4]>`),
+		},
+	}
+	datePattern := regexp.MustCompile(`<time[^>]*>([^<]+)</time>`)
+
+	seen := make(map[string]bool)
 	var articles []Article
-	for _, e := range feed.Entries {
-		href := e.Link.Href
-		if !strings.HasPrefix(href, "http") {
-			href = "https://www.reddit.com" + href
+	for _, p := range patterns {
+		for _, match := range p.link.FindAllStringSubmatch(page, -1) {
+			href := stdhtml.UnescapeString(strings.TrimSpace(match[1]))
+			if !strings.HasPrefix(href, "/news/") && href != "/glasswing" && href != "/81k-interviews" {
+				continue
+			}
+			u, err := url.Parse(href)
+			if err != nil {
+				continue
+			}
+			fullURL := base.ResolveReference(u).String()
+			if seen[fullURL] {
+				continue
+			}
+			titleMatch := p.title.FindStringSubmatch(match[2])
+			if len(titleMatch) < 2 {
+				continue
+			}
+			title := strings.TrimSpace(stdhtml.UnescapeString(titleMatch[1]))
+			if title == "" {
+				continue
+			}
+			date := ""
+			if dateMatch := datePattern.FindStringSubmatch(match[2]); len(dateMatch) >= 2 {
+				date = articleDate(stdhtml.UnescapeString(dateMatch[1]))
+			}
+			seen[fullURL] = true
+			articles = append(articles, Article{
+				Title:  title,
+				URL:    fullURL,
+				Source: source,
+				Date:   date,
+			})
 		}
-		articles = append(articles, Article{
-			Title:  strings.TrimSpace(e.Title),
-			URL:    href,
-			Source: source,
-		})
 	}
 	return articles
 }
@@ -423,6 +538,9 @@ func deduplicateArticles(articles []Article) []Article {
 			if a.Score > g.article.Score {
 				g.article.Score = a.Score
 			}
+			if g.article.Date == "" {
+				g.article.Date = a.Date
+			}
 		} else {
 			seen[key] = len(groups)
 			groups = append(groups, group{article: a, sources: []string{a.Source}})
@@ -436,6 +554,22 @@ func deduplicateArticles(articles []Article) []Article {
 		result[i] = a
 	}
 	return result
+}
+
+func filterRecentArticles(articles []Article, months int, now time.Time) []Article {
+	cutoff := now.AddDate(0, -months, 0)
+	filtered := articles[:0]
+	for _, a := range articles {
+		if a.Date == "" {
+			filtered = append(filtered, a)
+			continue
+		}
+		published, ok := parseArticleDate(a.Date)
+		if !ok || !published.Before(cutoff) {
+			filtered = append(filtered, a)
+		}
+	}
+	return filtered
 }
 
 // ─── OG image ─────────────────────────────────────────────────────────────────
@@ -765,6 +899,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("load intermediate data: %v", err)
 		}
+		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, time.Now())
 		renderData.Articles = filterArticlesByMinScore(renderData.Articles, CLI.MinScore)
 		renderData.Sources = collectSources(renderData.Articles)
 		if CLI.DataOut != "" {
@@ -816,8 +951,8 @@ func main() {
 				fn = func() []Article { return fetchAtom(f.URL, f.Name) }
 			case "rdf":
 				fn = func() []Article { return fetchRDF(f.URL, f.Name) }
-			case "reddit":
-				fn = func() []Article { return fetchRedditRSS(f.Subreddit) }
+			case "anthropic":
+				fn = func() []Article { return fetchAnthropicNews(f.URL, f.Name) }
 			default:
 				log.Printf("[WARN] unknown feed type %q for %q", f.Type, f.Name)
 				continue
@@ -847,6 +982,10 @@ func main() {
 	before := len(allArticles)
 	allArticles = deduplicateArticles(allArticles)
 	log.Printf("After dedup: %d articles (removed %d duplicates)", len(allArticles), before-len(allArticles))
+
+	before = len(allArticles)
+	allArticles = filterRecentArticles(allArticles, recentArticleMonths, time.Now())
+	log.Printf("After recent filter: %d articles (removed %d older than %d months)", len(allArticles), before-len(allArticles), recentArticleMonths)
 
 	// OG image fetch (all articles, cached)
 	log.Println("Fetching OG images...")
