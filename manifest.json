@@ -1,0 +1,22 @@
+{
+  "name": "KijiYomu",
+  "short_name": "KijiYomu",
+  "description": "AIキュレーションRSSリーダー",
+  "start_url": "./kijiyomu.html",
+  "display": "standalone",
+  "background_color": "#F8F8FB",
+  "theme_color": "#F8F8FB",
+  "icons": [
+    {
+      "src": "static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

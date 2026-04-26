@@ -4,3 +4,5 @@ node_modules/
 .kijiyomu_cache.json
 kijiyomu.html
 kijiyomu-data.json
+/icon-192.png
+/icon-512.png

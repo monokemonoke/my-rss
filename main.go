@@ -1238,12 +1238,16 @@ self.addEventListener('fetch', e => {
 func writePWAFiles(outHTMLPath string) error {
 	dir := filepath.Dir(outHTMLPath)
 	htmlName := filepath.Base(outHTMLPath)
-
-	if err := os.WriteFile(filepath.Join(dir, "icon-192.png"), faviconPNG, 0644); err != nil {
-		return fmt.Errorf("write icon-192.png: %w", err)
+	iconDir := filepath.Join(dir, "static")
+	if err := os.MkdirAll(iconDir, 0755); err != nil {
+		return fmt.Errorf("create static dir: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "icon-512.png"), faviconPNG, 0644); err != nil {
-		return fmt.Errorf("write icon-512.png: %w", err)
+
+	if err := os.WriteFile(filepath.Join(iconDir, "icon-192.png"), faviconPNG, 0644); err != nil {
+		return fmt.Errorf("write static/icon-192.png: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(iconDir, "icon-512.png"), faviconPNG, 0644); err != nil {
+		return fmt.Errorf("write static/icon-512.png: %w", err)
 	}
 
 	type icon struct {
@@ -1270,8 +1274,8 @@ func writePWAFiles(outHTMLPath string) error {
 		BackgroundColor: "#F8F8FB",
 		ThemeColor:      "#F8F8FB",
 		Icons: []icon{
-			{Src: "icon-192.png", Sizes: "192x192", Type: "image/png"},
-			{Src: "icon-512.png", Sizes: "512x512", Type: "image/png", Purpose: "any maskable"},
+			{Src: "static/icon-192.png", Sizes: "192x192", Type: "image/png"},
+			{Src: "static/icon-512.png", Sizes: "512x512", Type: "image/png", Purpose: "any maskable"},
 		},
 	}
 	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
