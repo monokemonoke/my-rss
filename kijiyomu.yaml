@@ -118,3 +118,8 @@ feeds:
     name: Zennのトレンド
     type: rss
     url: https://zenn.dev/feed
+
+  - id: "9891234567890"
+    name: HuggingFace Daily Papers
+    type: rss
+    url: https://rsshub.app/huggingface/daily-papers
