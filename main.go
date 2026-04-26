@@ -38,6 +38,8 @@ var CLI struct {
 	APIKey    string `help:"API key (optional)" env:"AI_API_KEY"`
 	Model     string `help:"Model name" env:"AI_MODEL" default:"gpt-4o-mini"`
 	Out       string `help:"Output HTML file" default:"kijiyomu.html"`
+	DataIn    string `help:"Read intermediate JSON and render HTML without fetching/scoring"`
+	DataOut   string `help:"Write intermediate JSON after fetching/scoring"`
 	MinScore  int    `help:"Minimum AI score to include (0=include all)" default:"0"`
 	CacheFile string `help:"Cache file for AI scores" default:".kijiyomu_cache.json"`
 	Config    string `help:"Feed config YAML file" default:"kijiyomu.yaml"`
@@ -47,7 +49,7 @@ var CLI struct {
 
 type FeedConfig struct {
 	Name      string `yaml:"name"`
-	Type      string `yaml:"type"`      // hn, rss, atom, rdf, reddit
+	Type      string `yaml:"type"` // hn, rss, atom, rdf, reddit
 	URL       string `yaml:"url"`
 	Subreddit string `yaml:"subreddit"` // for type: reddit
 	Limit     int    `yaml:"limit"`     // for type: hn (default: 50)
@@ -73,14 +75,21 @@ func loadConfig(path string) (*Config, error) {
 // ─── Data types ───────────────────────────────────────────────────────────────
 
 type Article struct {
-	Title     string
-	TitleJA   string // 日本語タイトル（英語記事の場合に設定）
-	URL       string
-	Source    string
-	Score     int    // points/bookmarks
-	AIScore   int    // 0-100 from LLM
-	Reason    string // LLM explanation
-	OGImage   string // og:image URL
+	Title   string `json:"title"`
+	TitleJA string `json:"title_ja,omitempty"` // 日本語タイトル（英語記事の場合に設定）
+	URL     string `json:"url"`
+	Source  string `json:"source"`
+	Score   int    `json:"score,omitempty"`    // points/bookmarks
+	AIScore int    `json:"ai_score,omitempty"` // 0-100 from LLM
+	Reason  string `json:"reason,omitempty"`   // LLM explanation
+	OGImage string `json:"og_image,omitempty"` // og:image URL
+}
+
+type RenderData struct {
+	SchemaVersion int       `json:"schema_version"`
+	Date          string    `json:"date"`
+	Articles      []Article `json:"articles"`
+	Sources       []string  `json:"sources,omitempty"`
 }
 
 // RSS / Atom
@@ -136,10 +145,10 @@ type AIResult struct {
 // ─── Cache ────────────────────────────────────────────────────────────────────
 
 type CacheEntry struct {
-	AIScore   int    `json:"ai_score,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-	TitleJA   string `json:"title_ja,omitempty"`
-	OGImage   string `json:"og_image,omitempty"` // og:image URL ("-" = not found)
+	AIScore int    `json:"ai_score,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	TitleJA string `json:"title_ja,omitempty"`
+	OGImage string `json:"og_image,omitempty"` // og:image URL ("-" = not found)
 }
 
 type Cache struct {
@@ -328,7 +337,6 @@ func fetchRDF(rawURL, source string) []Article {
 	return articles
 }
 
-
 func fetchRedditRSS(sub string) []Article {
 	rawURL := fmt.Sprintf("https://www.reddit.com/r/%s/.rss", sub)
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -362,7 +370,6 @@ func fetchRedditRSS(sub string) []Article {
 	}
 	return articles
 }
-
 
 // ─── Deduplication ────────────────────────────────────────────────────────────
 
@@ -652,6 +659,86 @@ func scoreArticlesWithAI(articles []Article, client *openai.Client, model string
 
 // ─── HTML output ──────────────────────────────────────────────────────────────
 
+func collectSources(articles []Article) []string {
+	sourceSet := map[string]bool{}
+	for _, a := range articles {
+		sourceSet[a.Source] = true
+	}
+	var sources []string
+	for s := range sourceSet {
+		sources = append(sources, s)
+	}
+	sort.Strings(sources)
+	return sources
+}
+
+func filterArticlesByMinScore(articles []Article, minScore int) []Article {
+	if minScore <= 0 {
+		return articles
+	}
+	filtered := articles[:0]
+	for _, a := range articles {
+		if a.AIScore >= minScore {
+			filtered = append(filtered, a)
+		}
+	}
+	return filtered
+}
+
+func loadRenderData(path string) (*RenderData, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var renderData RenderData
+	if err := json.Unmarshal(data, &renderData); err != nil {
+		return nil, err
+	}
+	if renderData.Sources == nil {
+		renderData.Sources = collectSources(renderData.Articles)
+	}
+	if renderData.Date == "" {
+		renderData.Date = time.Now().Format("2006-01-02 15:04")
+	}
+	return &renderData, nil
+}
+
+func saveRenderData(path string, renderData RenderData) error {
+	data, err := json.MarshalIndent(renderData, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func renderHTML(path string, renderData RenderData) error {
+	funcMap := template.FuncMap{
+		"scoreClass": scoreClass,
+	}
+	tmpl := template.Must(template.New("feed").Funcs(funcMap).Parse(htmlTmpl))
+
+	data := struct {
+		Date     string
+		Articles []Article
+		Sources  []string
+		CSS      template.CSS
+		JS       template.JS
+	}{
+		Date:     renderData.Date,
+		Articles: renderData.Articles,
+		Sources:  renderData.Sources,
+		CSS:      template.CSS(cssContent),
+		JS:       template.JS(jsContent),
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	return tmpl.Execute(f, data)
+}
+
 // ─── Template helpers ─────────────────────────────────────────────────────────
 
 func scoreClass(score int) string {
@@ -671,6 +758,26 @@ func scoreClass(score int) string {
 
 func main() {
 	kong.Parse(&CLI)
+
+	if CLI.DataIn != "" {
+		renderData, err := loadRenderData(CLI.DataIn)
+		if err != nil {
+			log.Fatalf("load intermediate data: %v", err)
+		}
+		renderData.Articles = filterArticlesByMinScore(renderData.Articles, CLI.MinScore)
+		renderData.Sources = collectSources(renderData.Articles)
+		if CLI.DataOut != "" {
+			if err := saveRenderData(CLI.DataOut, *renderData); err != nil {
+				log.Fatalf("write intermediate data: %v", err)
+			}
+			log.Printf("Written data: %s (%d articles)", CLI.DataOut, len(renderData.Articles))
+		}
+		if err := renderHTML(CLI.Out, *renderData); err != nil {
+			log.Fatalf("render HTML: %v", err)
+		}
+		log.Printf("Written: %s (%d articles)", CLI.Out, len(renderData.Articles))
+		return
+	}
 
 	cache := loadCache(CLI.CacheFile)
 
@@ -755,57 +862,25 @@ func main() {
 		sort.Slice(allArticles, func(i, j int) bool {
 			return allArticles[i].AIScore > allArticles[j].AIScore
 		})
-		if CLI.MinScore > 0 {
-			filtered := allArticles[:0]
-			for _, a := range allArticles {
-				if a.AIScore >= CLI.MinScore {
-					filtered = append(filtered, a)
-				}
-			}
-			allArticles = filtered
-		}
+		allArticles = filterArticlesByMinScore(allArticles, CLI.MinScore)
 	}
 
 	cache.save()
 
-	// collect unique sources for filter buttons
-	sourceSet := map[string]bool{}
-	for _, a := range allArticles {
-		sourceSet[a.Source] = true
+	renderData := RenderData{
+		SchemaVersion: 1,
+		Date:          time.Now().Format("2006-01-02 15:04"),
+		Articles:      allArticles,
+		Sources:       collectSources(allArticles),
 	}
-	var sources []string
-	for s := range sourceSet {
-		sources = append(sources, s)
+	if CLI.DataOut != "" {
+		if err := saveRenderData(CLI.DataOut, renderData); err != nil {
+			log.Fatalf("write intermediate data: %v", err)
+		}
+		log.Printf("Written data: %s (%d articles)", CLI.DataOut, len(renderData.Articles))
 	}
-	sort.Strings(sources)
-
-	// render HTML
-	funcMap := template.FuncMap{
-		"scoreClass": scoreClass,
-	}
-	tmpl := template.Must(template.New("feed").Funcs(funcMap).Parse(htmlTmpl))
-
-	data := struct {
-		Date     string
-		Articles []Article
-		Sources  []string
-		CSS      template.CSS
-		JS       template.JS
-	}{
-		Date:     time.Now().Format("2006-01-02 15:04"),
-		Articles: allArticles,
-		Sources:  sources,
-		CSS:      template.CSS(cssContent),
-		JS:       template.JS(jsContent),
-	}
-
-	f, err := os.Create(CLI.Out)
-	if err != nil {
-		log.Fatalf("create output: %v", err)
-	}
-	defer func() { _ = f.Close() }()
-	if err := tmpl.Execute(f, data); err != nil {
-		log.Fatalf("render template: %v", err)
+	if err := renderHTML(CLI.Out, renderData); err != nil {
+		log.Fatalf("render HTML: %v", err)
 	}
 	log.Printf("Written: %s (%d articles)", CLI.Out, len(allArticles))
 }

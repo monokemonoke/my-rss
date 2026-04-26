@@ -34,6 +34,12 @@ dotenvx run -- ./kijiyomu
 # スコア 40 以上のみ表示
 dotenvx run -- ./kijiyomu --min-score 40
 
+# 中間 JSON も保存
+dotenvx run -- ./kijiyomu --data-out kijiyomu-data.json
+
+# 中間 JSON から HTML だけ再生成（フィード取得・AI スコアリングなし）
+go run main.go --data-in kijiyomu-data.json --out kijiyomu.html
+
 ```
 
 ## オプション一覧
@@ -44,9 +50,22 @@ dotenvx run -- ./kijiyomu --min-score 40
 | `--api-key` | `AI_API_KEY` | (なし) | API キー |
 | `--model` | `AI_MODEL` | `gpt-4o-mini` | モデル名 |
 | `--out` | | `kijiyomu.html` | 出力 HTML ファイル名 |
+| `--data-in` | | (なし) | 中間 JSON を読み込んで HTML だけ生成 |
+| `--data-out` | | (なし) | 取得・スコアリング後の中間 JSON を保存 |
 | `--min-score` | | `0` | AI スコアの下限（0=フィルタなし） |
 | `--cache-file` | | `.kijiyomu_cache.json` | キャッシュファイルのパス |
 | `--config` | | `kijiyomu.yaml` | フィードソース設定ファイル |
+
+## HTML デザインのローカル調整
+
+`templates/main.html`、`static/style.css`、`static/script.js` を試行錯誤するときは、先に中間 JSON を作っておくと外部 API を呼ばずに再生成できます。
+
+```bash
+dotenvx run -- go run main.go --data-out kijiyomu-data.json
+go run main.go --data-in kijiyomu-data.json --out kijiyomu.html
+```
+
+`--data-in` 指定時はフィード取得、OG イメージ取得、AI スコアリングをスキップします。`--min-score` は中間 JSON からの再生成時にも適用できます。
 
 ## フィードソースの設定（kijiyomu.yaml）
 
