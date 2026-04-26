@@ -702,14 +702,19 @@ func callAI(client *openai.Client, model, system, userMsg string) (string, error
 
 // ─── AI summarization ─────────────────────────────────────────────────────────
 
+var (
+	reScript = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
+	reStyle  = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
+	reTag    = regexp.MustCompile(`<[^>]+>`)
+	reSpace  = regexp.MustCompile(`\s+`)
+)
+
 // stripHTML はHTMLタグ・スクリプト・スタイルを除去してプレーンテキストを返す
 func stripHTML(s string) string {
-	reBlock := regexp.MustCompile(`(?is)<(script|style)[^>]*>.*?</\1>`)
-	s = reBlock.ReplaceAllString(s, " ")
-	reTag := regexp.MustCompile(`<[^>]+>`)
+	s = reScript.ReplaceAllString(s, " ")
+	s = reStyle.ReplaceAllString(s, " ")
 	s = reTag.ReplaceAllString(s, " ")
 	s = stdhtml.UnescapeString(s)
-	reSpace := regexp.MustCompile(`\s+`)
 	return strings.TrimSpace(reSpace.ReplaceAllString(s, " "))
 }
 
