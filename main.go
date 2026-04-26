@@ -985,11 +985,6 @@ func main() {
 			log.Fatalf("load intermediate data: %v", err)
 		}
 		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, time.Now())
-		if aiClient != nil {
-			log.Printf("Summarizing with AI (model: %s)...", CLI.Model)
-			renderData.Articles = summarizeArticles(renderData.Articles, aiClient, CLI.Model, cache)
-			cache.save()
-		}
 		renderData.Sources = collectSources(renderData.Articles)
 		if CLI.DataOut != "" {
 			if err := saveRenderData(CLI.DataOut, *renderData); err != nil {
