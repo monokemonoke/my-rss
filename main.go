@@ -970,12 +970,26 @@ func dateLabel(raw string) string {
 func main() {
 	kong.Parse(&CLI)
 
+	cache := loadCache(CLI.CacheFile)
+
+	var aiClient *openai.Client
+	if CLI.APIBase != "" {
+		aiClient = newAIClient(CLI.APIBase, CLI.APIKey)
+	} else {
+		log.Println("[INFO] AI_API_BASE not set — summarization skipped")
+	}
+
 	if CLI.DataIn != "" {
 		renderData, err := loadRenderData(CLI.DataIn)
 		if err != nil {
 			log.Fatalf("load intermediate data: %v", err)
 		}
 		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, time.Now())
+		if aiClient != nil {
+			log.Printf("Summarizing with AI (model: %s)...", CLI.Model)
+			renderData.Articles = summarizeArticles(renderData.Articles, aiClient, CLI.Model, cache)
+			cache.save()
+		}
 		renderData.Sources = collectSources(renderData.Articles)
 		if CLI.DataOut != "" {
 			if err := saveRenderData(CLI.DataOut, *renderData); err != nil {
@@ -991,13 +1005,6 @@ func main() {
 		}
 		log.Printf("Written: %s (%d articles)", CLI.Out, len(renderData.Articles))
 		return
-	}
-
-	cache := loadCache(CLI.CacheFile)
-
-	var aiClient *openai.Client
-	if CLI.APIBase != "" {
-		aiClient = newAIClient(CLI.APIBase, CLI.APIKey)
 	}
 
 	log.Println("Fetching articles...")
