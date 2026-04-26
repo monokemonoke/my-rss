@@ -95,3 +95,29 @@ func TestDisplaySourceNameShortensArxivQuerySourceInJoinedSources(t *testing.T) 
 		t.Fatalf("displaySourceName = %q, want Zenn / ArXiv: AI agent", got)
 	}
 }
+
+func TestArxivHTMLURLConvertsPDFURL(t *testing.T) {
+	got, ok := arxivHTMLURL("https://arxiv.org/pdf/2401.12345v2.pdf?download=1")
+	if !ok {
+		t.Fatal("arxivHTMLURL returned ok=false")
+	}
+	if got != "https://arxiv.org/html/2401.12345v2" {
+		t.Fatalf("arxivHTMLURL = %q, want https://arxiv.org/html/2401.12345v2", got)
+	}
+}
+
+func TestArticleTextURLsTriesArxivHTMLBeforePDF(t *testing.T) {
+	got := articleTextURLs("https://arxiv.org/pdf/2401.12345")
+	want := []string{
+		"https://arxiv.org/html/2401.12345",
+		"https://arxiv.org/pdf/2401.12345",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("articleTextURLs = %#v, want %#v", got, want)
+		}
+	}
+}

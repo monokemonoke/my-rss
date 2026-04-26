@@ -920,9 +920,40 @@ func stripHTML(s string) string {
 	return strings.TrimSpace(reSpace.ReplaceAllString(s, " "))
 }
 
-// fetchArticleText は記事ページのプレーンテキストを取得する
-func fetchArticleText(rawURL string) string {
-	client := &http.Client{Timeout: 15 * time.Second}
+func arxivHTMLURL(rawURL string) (string, bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "arxiv.org" && host != "www.arxiv.org" {
+		return "", false
+	}
+	if !strings.HasPrefix(u.Path, "/pdf/") {
+		return "", false
+	}
+
+	id := strings.TrimPrefix(u.Path, "/pdf/")
+	id = strings.TrimSuffix(id, ".pdf")
+	if strings.TrimSpace(id) == "" {
+		return "", false
+	}
+
+	u.Host = "arxiv.org"
+	u.Path = "/html/" + id
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), true
+}
+
+func articleTextURLs(rawURL string) []string {
+	if htmlURL, ok := arxivHTMLURL(rawURL); ok {
+		return []string{htmlURL, rawURL}
+	}
+	return []string{rawURL}
+}
+
+func fetchPlainText(client *http.Client, rawURL string) string {
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		return ""
@@ -934,8 +965,23 @@ func fetchArticleText(rawURL string) string {
 		return ""
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return ""
+	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	return stripHTML(string(body))
+}
+
+// fetchArticleText は記事ページのプレーンテキストを取得する
+func fetchArticleText(rawURL string) string {
+	client := &http.Client{Timeout: 15 * time.Second}
+	for _, candidateURL := range articleTextURLs(rawURL) {
+		text := fetchPlainText(client, candidateURL)
+		if text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 const summarizeSystemPrompt = `あなたは記事の要約専門アシスタントです。
