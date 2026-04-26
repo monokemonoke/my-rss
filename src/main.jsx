@@ -1,5 +1,6 @@
-const { createElement: h, useCallback, useEffect, useMemo, useRef, useState } = React;
-const { createRoot } = ReactDOM;
+import React, { createElement as h, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import './style.css';
 
 const CARD_MIN_WIDTH = 280;
 const CARD_BODY_HEIGHT_DESKTOP = 148;

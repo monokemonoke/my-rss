@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -27,11 +28,14 @@ import (
 //go:embed templates/main.html
 var htmlTmpl string
 
-//go:embed static/style.css
+//go:embed static/dist/app.css
 var cssContent string
 
-//go:embed static/script.js
+//go:embed static/dist/app.js
 var jsContent string
+
+//go:embed static/logo.png
+var logoPNG []byte
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -864,6 +868,7 @@ func renderHTML(path string, renderData RenderData) error {
 		ArticlesJSON template.JS
 		CSS          template.CSS
 		JS           template.JS
+		LogoDataURI  template.URL
 	}{
 		Date:         renderData.Date,
 		Articles:     renderData.Articles,
@@ -871,6 +876,7 @@ func renderHTML(path string, renderData RenderData) error {
 		ArticlesJSON: template.JS(articlesJSON),
 		CSS:          template.CSS(cssContent),
 		JS:           template.JS(jsContent),
+		LogoDataURI:  template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(logoPNG)),
 	}
 
 	f, err := os.Create(path)

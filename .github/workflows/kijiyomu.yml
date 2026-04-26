@@ -26,6 +26,15 @@ jobs:
           go-version-file: go.mod
           cache: true  # go module cache
 
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend assets
+        run: pnpm run build
+
       # キャッシュリストア: key が存在しなくても restore-keys で最新を取得
       - name: Restore KijiYomu cache
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4

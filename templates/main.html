@@ -4,20 +4,21 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>KijiYomu - {{.Date}}</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="icon" type="image/png" href="{{.LogoDataURI}}">
+<script>(function(){var t=localStorage.getItem('kijiyomu-theme')||(window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.dataset.theme=t;})()</script>
 <style>{{.CSS}}</style>
 </head>
 <body>
 <div class="wrap">
 <header>
-  <h1>⚡ KijiYomu</h1>
+  <h1><img class="site-logo" src="{{.LogoDataURI}}" alt="KijiYomu"></h1>
   <span>{{.Date}} — {{len .Articles}} 件</span>
+  <button class="theme-toggle" id="theme-toggle" onclick="(function(){var n=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=n;localStorage.setItem('kijiyomu-theme',n);document.getElementById('theme-toggle').textContent=n==='dark'?'☀':'☾';})()" title="テーマ切り替え">☾</button>
 </header>
+<script>(function(){var t=document.documentElement.dataset.theme;document.getElementById('theme-toggle').textContent=t==='dark'?'☀':'☾';})()</script>
 <div id="articles-root"></div>
 </div>
 <script id="articles-data" type="application/json">{{.ArticlesJSON}}</script>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-<script>{{.JS}}</script>
+<script type="module">{{.JS}}</script>
 </body>
 </html>

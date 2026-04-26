@@ -5,6 +5,8 @@
 ## セットアップ
 
 ```bash
+pnpm install
+pnpm run build
 go build -o kijiyomu .
 ```
 
@@ -58,10 +60,11 @@ go run main.go --data-in kijiyomu-data.json --out kijiyomu.html
 
 ## HTML デザインのローカル調整
 
-`templates/main.html`、`static/style.css`、`static/script.js` を試行錯誤するときは、先に中間 JSON を作っておくと外部 API を呼ばずに再生成できます。
+`templates/main.html`、`src/style.css`、`src/main.jsx` を試行錯誤するときは、先に中間 JSON を作っておくと外部 API を呼ばずに再生成できます。React/CSS の変更後は `pnpm run build` で `static/dist/` を更新してから HTML を再生成します。
 
 ```bash
 dotenvx run -- go run main.go --data-out kijiyomu-data.json
+pnpm run build
 go run main.go --data-in kijiyomu-data.json --out kijiyomu.html
 ```
 
