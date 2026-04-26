@@ -1249,6 +1249,9 @@ func writePWAFiles(outHTMLPath string) error {
 	if err := os.WriteFile(filepath.Join(iconDir, "icon-512.png"), faviconPNG, 0644); err != nil {
 		return fmt.Errorf("write static/icon-512.png: %w", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "apple-touch-icon.png"), faviconPNG, 0644); err != nil {
+		return fmt.Errorf("write apple-touch-icon.png: %w", err)
+	}
 
 	type icon struct {
 		Src     string `json:"src"`
