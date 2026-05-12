@@ -754,6 +754,18 @@ func deduplicateArticles(articles []Article) []Article {
 	return result
 }
 
+func sortArticlesByDate(articles []Article) []Article {
+	sort.SliceStable(articles, func(i, j int) bool {
+		ti, oki := parseArticleDate(articles[i].Date)
+		tj, okj := parseArticleDate(articles[j].Date)
+		if oki && okj {
+			return ti.After(tj)
+		}
+		return oki && !okj // 日付なし記事は末尾へ
+	})
+	return articles
+}
+
 func filterRecentArticles(articles []Article, months int, now time.Time) []Article {
 	cutoff := now.AddDate(0, -months, 0)
 	filtered := articles[:0]
@@ -1336,6 +1348,7 @@ func main() {
 		renderData.SchemaVersion = 2
 		renderData.Articles = normalizeArticleSources(renderData.Articles)
 		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, time.Now())
+		renderData.Articles = sortArticlesByDate(renderData.Articles)
 		renderData.Articles = ensureArticleTags(renderData.Articles, allowedTags)
 		renderData.Sources = collectSources(renderData.Articles)
 		if CLI.DataOut != "" {
@@ -1415,6 +1428,8 @@ func main() {
 	before = len(allArticles)
 	allArticles = filterRecentArticles(allArticles, recentArticleMonths, time.Now())
 	log.Printf("After recent filter: %d articles (removed %d older than %d months)", len(allArticles), before-len(allArticles), recentArticleMonths)
+
+	allArticles = sortArticlesByDate(allArticles)
 
 	// OG image fetch (all articles, cached)
 	log.Println("Fetching OG images...")
