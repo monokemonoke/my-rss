@@ -1193,14 +1193,22 @@ func renderHTML(path string, renderData RenderData) error {
 	if err != nil {
 		return err
 	}
+	pushEndpointJSON, err := json.Marshal(CLI.PushEndpoint)
+	if err != nil {
+		return err
+	}
+	vapidPublicKeyJSON, err := json.Marshal(CLI.VAPIDPublicKey)
+	if err != nil {
+		return err
+	}
 
 	data := struct {
 		Date           string
 		Articles       []Article
 		Sources        []string
 		ArticlesJSON   template.JS
-		PushEndpoint   string
-		VAPIDPublicKey string
+		PushEndpoint   template.JS
+		VAPIDPublicKey template.JS
 		CSS            template.CSS
 		JS             template.JS
 		LogoDataURI    template.URL
@@ -1210,8 +1218,8 @@ func renderHTML(path string, renderData RenderData) error {
 		Articles:       renderData.Articles,
 		Sources:        renderData.Sources,
 		ArticlesJSON:   template.JS(articlesJSON),
-		PushEndpoint:   CLI.PushEndpoint,
-		VAPIDPublicKey: CLI.VAPIDPublicKey,
+		PushEndpoint:   template.JS(pushEndpointJSON),
+		VAPIDPublicKey: template.JS(vapidPublicKeyJSON),
 		CSS:            template.CSS(cssContent),
 		JS:             template.JS(jsContent),
 		LogoDataURI:    template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(logoPNG)),

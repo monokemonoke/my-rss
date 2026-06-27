@@ -30,8 +30,8 @@
 <script id="articles-data" type="application/json">{{.ArticlesJSON}}</script>
 <script>
 window.KIJIYOMU_PUSH = {
-  endpoint: {{printf "%q" .PushEndpoint}},
-  vapidPublicKey: {{printf "%q" .VAPIDPublicKey}}
+  endpoint: {{.PushEndpoint}},
+  vapidPublicKey: {{.VAPIDPublicKey}}
 };
 </script>
 <script type="module">{{.JS}}</script>
