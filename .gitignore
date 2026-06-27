@@ -1,6 +1,7 @@
 /.env
 /kijiyomu
 node_modules/
+.pnpm-store/
 .kijiyomu_cache.json
 kijiyomu.html
 kijiyomu-data.json

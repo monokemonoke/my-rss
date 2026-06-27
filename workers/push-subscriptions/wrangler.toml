@@ -4,5 +4,5 @@ compatibility_date = "2026-06-27"
 
 [[kv_namespaces]]
 binding = "PUSH_SUBSCRIPTIONS"
-id = "replace-with-production-kv-namespace-id"
-preview_id = "replace-with-preview-kv-namespace-id"
+id = "cc63328a05bb44a889ce4c891d1e8a9d"
+preview_id = "cc63328a05bb44a889ce4c891d1e8a9d"
