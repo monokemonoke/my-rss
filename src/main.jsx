@@ -1,6 +1,6 @@
 import React, { createElement as h, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Search } from 'lucide-react';
+import { Bell, BellOff, Search } from 'lucide-react';
 import './style.css';
 
 const TWEMOJI_CDN = 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/';
@@ -20,6 +20,68 @@ function readArticles() {
   const el = document.getElementById('articles-data');
   if (!el) return [];
   try { return JSON.parse(el.textContent || '[]'); } catch { return []; }
+}
+
+function pushConfig() {
+  const cfg = window.KIJIYOMU_PUSH || {};
+  return {
+    endpoint: String(cfg.endpoint || '').replace(/\/+$/, ''),
+    vapidPublicKey: String(cfg.vapidPublicKey || ''),
+  };
+}
+
+function urlBase64ToUint8Array(value) {
+  const padding = '='.repeat((4 - value.length % 4) % 4);
+  const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = window.atob(base64);
+  return Uint8Array.from([...raw].map((char) => char.charCodeAt(0)));
+}
+
+async function getPushRegistration() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return null;
+  const registration = await navigator.serviceWorker.ready;
+  return registration;
+}
+
+async function readPushState() {
+  const cfg = pushConfig();
+  if (!cfg.endpoint || !cfg.vapidPublicKey) return { supported: false, subscribed: false };
+  const registration = await getPushRegistration();
+  if (!registration) return { supported: false, subscribed: false };
+  const subscription = await registration.pushManager.getSubscription();
+  return { supported: true, subscribed: Boolean(subscription), permission: Notification.permission };
+}
+
+async function enablePush() {
+  const cfg = pushConfig();
+  const registration = await getPushRegistration();
+  if (!registration) throw new Error('push-not-supported');
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') throw new Error('notification-permission-denied');
+  const subscription = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(cfg.vapidPublicKey),
+  });
+  const res = await fetch(`${cfg.endpoint}/subscribe`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(subscription),
+  });
+  if (!res.ok) throw new Error('subscribe-failed');
+}
+
+async function disablePush() {
+  const cfg = pushConfig();
+  const registration = await getPushRegistration();
+  if (!registration) return;
+  const subscription = await registration.pushManager.getSubscription();
+  if (!subscription) return;
+  await fetch(`${cfg.endpoint}/unsubscribe`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ endpoint: subscription.endpoint }),
+  }).catch(() => {});
+  await subscription.unsubscribe();
 }
 
 function dateLabel(raw) {
@@ -149,6 +211,49 @@ function TagFilter({ tags, selectedTag, open, onToggleOpen, onSelectTag }) {
   );
 }
 
+function PushToggle() {
+  const cfg = pushConfig();
+  const [state, setState] = useState({ supported: false, subscribed: false, loading: Boolean(cfg.endpoint) });
+
+  useEffect(() => {
+    let alive = true;
+    readPushState()
+      .then((next) => { if (alive) setState({ ...next, loading: false }); })
+      .catch(() => { if (alive) setState({ supported: false, subscribed: false, loading: false }); });
+    return () => { alive = false; };
+  }, []);
+
+  if (!cfg.endpoint || !cfg.vapidPublicKey || state.loading || !state.supported) return null;
+
+  const toggle = async () => {
+    setState((value) => ({ ...value, loading: true }));
+    try {
+      if (state.subscribed) await disablePush();
+      else await enablePush();
+      const next = await readPushState();
+      setState({ ...next, loading: false });
+    } catch {
+      setState((value) => ({ ...value, loading: false }));
+    }
+  };
+
+  return h(
+    'button',
+    {
+      type: 'button',
+      className: `push-toggle${state.subscribed ? ' push-toggle-active' : ''}`,
+      title: state.subscribed ? '通知を停止' : '通知を受け取る',
+      'aria-label': state.subscribed ? '通知を停止' : '通知を受け取る',
+      'aria-pressed': state.subscribed ? 'true' : 'false',
+      disabled: state.loading,
+      onClick: toggle,
+    },
+    state.subscribed
+      ? h(Bell, { size: 18, strokeWidth: 2, 'aria-hidden': 'true' })
+      : h(BellOff, { size: 18, strokeWidth: 2, 'aria-hidden': 'true' })
+  );
+}
+
 function App({ articles }) {
   const gridRef = useRef(null);
   const [selectedTag, setSelectedTag] = useState(null);
@@ -195,6 +300,7 @@ function App({ articles }) {
   return h(
     React.Fragment,
     null,
+    h(PushToggle),
     h(
       'div',
       { className: 'card-grid', ref: gridRef },

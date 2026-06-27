@@ -44,14 +44,16 @@ var faviconPNG []byte
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
 var CLI struct {
-	APIBase   string `help:"OpenAI-compatible API host URL" env:"AI_API_BASE"`
-	APIKey    string `help:"API key (optional)" env:"AI_API_KEY"`
-	Model     string `help:"Model name" env:"AI_MODEL" default:"gpt-4o-mini"`
-	Out       string `help:"Output HTML file" default:"kijiyomu.html"`
-	DataIn    string `help:"Read intermediate JSON and render HTML without fetching"`
-	DataOut   string `help:"Write intermediate JSON after fetching"`
-	CacheFile string `help:"Cache file" default:".kijiyomu_cache.json"`
-	Config    string `help:"Feed config YAML file" default:"kijiyomu.yaml"`
+	APIBase        string `help:"OpenAI-compatible API host URL" env:"AI_API_BASE"`
+	APIKey         string `help:"API key (optional)" env:"AI_API_KEY"`
+	Model          string `help:"Model name" env:"AI_MODEL" default:"gpt-4o-mini"`
+	PushEndpoint   string `help:"Cloudflare Worker push subscription endpoint" env:"PUSH_WORKER_URL"`
+	VAPIDPublicKey string `help:"Web Push VAPID public key" env:"VAPID_PUBLIC_KEY"`
+	Out            string `help:"Output HTML file" default:"kijiyomu.html"`
+	DataIn         string `help:"Read intermediate JSON and render HTML without fetching"`
+	DataOut        string `help:"Write intermediate JSON after fetching"`
+	CacheFile      string `help:"Cache file" default:".kijiyomu_cache.json"`
+	Config         string `help:"Feed config YAML file" default:"kijiyomu.yaml"`
 }
 
 // ─── Feed config ───────────────────────────────────────────────────────────────
@@ -1197,6 +1199,8 @@ func renderHTML(path string, renderData RenderData) error {
 		Articles       []Article
 		Sources        []string
 		ArticlesJSON   template.JS
+		PushEndpoint   string
+		VAPIDPublicKey string
 		CSS            template.CSS
 		JS             template.JS
 		LogoDataURI    template.URL
@@ -1206,6 +1210,8 @@ func renderHTML(path string, renderData RenderData) error {
 		Articles:       renderData.Articles,
 		Sources:        renderData.Sources,
 		ArticlesJSON:   template.JS(articlesJSON),
+		PushEndpoint:   CLI.PushEndpoint,
+		VAPIDPublicKey: CLI.VAPIDPublicKey,
 		CSS:            template.CSS(cssContent),
 		JS:             template.JS(jsContent),
 		LogoDataURI:    template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(logoPNG)),
@@ -1245,6 +1251,27 @@ self.addEventListener('fetch', e => {
       })
       .catch(() => caches.match(e.request))
   );
+});
+
+self.addEventListener('push', e => {
+  let payload = {};
+  if (e.data) {
+    try { payload = e.data.json(); } catch { payload = { title: e.data.text() }; }
+  }
+  const title = payload.title || 'KijiYomu';
+  const options = {
+    body: payload.body || '新しい記事があります',
+    icon: './static/icon-192.png',
+    badge: './static/icon-192.png',
+    data: { url: payload.url || './' },
+  };
+  e.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const url = e.notification.data && e.notification.data.url ? e.notification.data.url : './';
+  e.waitUntil(clients.openWindow(url));
 });
 `
 

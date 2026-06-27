@@ -4,7 +4,8 @@
   "type": "module",
   "packageManager": "pnpm@10.25.0",
   "scripts": {
-    "build": "vite build"
+    "build": "vite build",
+    "notify:new-articles": "node scripts/notify-new-articles.mjs"
   },
   "engines": {
     "node": ">=20.19.0"
@@ -16,6 +17,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.1",
-    "vite": "^8.0.10"
+    "vite": "^8.0.10",
+    "web-push": "^3.6.7"
   }
 }
