@@ -110,13 +110,12 @@ function ArticleCard({ article }) {
   );
 }
 
-function tagStatsFromArticles(articles) {
+function countBy(articles, pick) {
   const counts = new Map();
   for (const article of articles) {
-    const tags = Array.isArray(article.tags) ? article.tags : [];
-    for (const tag of tags) {
-      if (!tag) continue;
-      counts.set(tag, (counts.get(tag) || 0) + 1);
+    for (const value of pick(article)) {
+      if (!value) continue;
+      counts.set(value, (counts.get(value) || 0) + 1);
     }
   }
   return Array.from(counts.entries())
@@ -124,42 +123,109 @@ function tagStatsFromArticles(articles) {
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
 
-function TagFilter({ tags, selectedTag, open, onToggleOpen, onSelectTag }) {
+// 検索対象の文字列は記事ごとに 1 度だけ組み立てて使い回す
+const searchIndex = new WeakMap();
+
+function searchTextOf(article) {
+  let text = searchIndex.get(article);
+  if (text === undefined) {
+    text = [article.title || '', ...(article.summary || []), ...(article.tags || []), ...articleSources(article)]
+      .join(' ')
+      .toLowerCase();
+    searchIndex.set(article, text);
+  }
+  return text;
+}
+
+function FilterChips({ items, selected, open, onSelect }) {
   return h(
     'div',
-    { className: 'tag-filter' },
+    { className: 'filter-chips' },
+    h(
+      'button',
+      {
+        type: 'button',
+        className: `filter-chip${selected === null ? ' filter-chip-active' : ''}`,
+        tabIndex: open ? 0 : -1,
+        onClick: () => onSelect(null),
+      },
+      'すべて'
+    ),
+    ...items.map(({ name, count }) => h(
+      'button',
+      {
+        type: 'button',
+        key: name,
+        className: `filter-chip${selected === name ? ' filter-chip-active' : ''}`,
+        tabIndex: open ? 0 : -1,
+        onClick: () => onSelect(selected === name ? null : name),
+      },
+      h('span', null, name),
+      h('span', { className: 'filter-chip-count' }, String(count))
+    ))
+  );
+}
+
+function FilterPanel({
+  open, onToggleOpen,
+  query, onQueryChange,
+  tags, selectedTag, onSelectTag,
+  sources, selectedSource, onSelectSource,
+  matchCount, filtered, onClear,
+}) {
+  const searchRef = useRef(null);
+
+  useEffect(() => {
+    if (open) searchRef.current?.focus();
+  }, [open]);
+
+  return h(
+    'div',
+    { className: 'filter-dock' },
     h(
       'div',
-      { className: `tag-panel${open ? ' tag-panel-open' : ''}`, 'aria-hidden': open ? 'false' : 'true' },
+      { className: `filter-panel${open ? ' filter-panel-open' : ''}`, 'aria-hidden': open ? 'false' : 'true' },
+      h('input', {
+        ref: searchRef,
+        type: 'search',
+        className: 'filter-search',
+        placeholder: 'タイトル・要約から検索',
+        'aria-label': '記事を検索',
+        value: query,
+        tabIndex: open ? 0 : -1,
+        onChange: (event) => onQueryChange(event.target.value),
+      }),
       h(
-        'button',
-        {
-          type: 'button',
-          className: `filter-chip${selectedTag === null ? ' filter-chip-active' : ''}`,
-          tabIndex: open ? 0 : -1,
-          onClick: () => onSelectTag(null),
-        },
-        'すべて'
+        'div',
+        { className: 'filter-status' },
+        h('span', null, `${matchCount}件`),
+        filtered
+          ? h('button', { type: 'button', className: 'filter-clear', tabIndex: open ? 0 : -1, onClick: onClear }, '絞り込みを解除')
+          : null
       ),
-      ...tags.map(({ name, count }) => h(
-        'button',
-        {
-          type: 'button',
-          key: name,
-          className: `filter-chip${selectedTag === name ? ' filter-chip-active' : ''}`,
-          tabIndex: open ? 0 : -1,
-          onClick: () => onSelectTag(selectedTag === name ? null : name),
-        },
-        h('span', null, name),
-        h('span', { className: 'filter-chip-count' }, String(count))
-      ))
+      tags.length > 0
+        ? h(
+            'div',
+            { className: 'filter-section' },
+            h('div', { className: 'filter-section-label' }, 'タグ'),
+            h(FilterChips, { items: tags, selected: selectedTag, open, onSelect: onSelectTag })
+          )
+        : null,
+      sources.length > 0
+        ? h(
+            'div',
+            { className: 'filter-section' },
+            h('div', { className: 'filter-section-label' }, 'ソース'),
+            h(FilterChips, { items: sources, selected: selectedSource, open, onSelect: onSelectSource })
+          )
+        : null
     ),
     h(
       'button',
       {
         type: 'button',
-        className: `filter-toggle${open ? ' filter-toggle-active' : ''}`,
-        'aria-label': 'タグで絞り込む',
+        className: `filter-toggle${open ? ' filter-toggle-active' : ''}${filtered ? ' filter-toggle-filtered' : ''}`,
+        'aria-label': '検索・絞り込み',
         'aria-expanded': open ? 'true' : 'false',
         onClick: onToggleOpen,
       },
@@ -170,16 +236,30 @@ function TagFilter({ tags, selectedTag, open, onToggleOpen, onSelectTag }) {
 
 function App({ articles }) {
   const gridRef = useRef(null);
+  const [query, setQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState(null);
+  const [selectedSource, setSelectedSource] = useState(null);
   const [filterOpen, setFilterOpen] = useState(false);
-  const tags = useMemo(() => tagStatsFromArticles(articles), [articles]);
+
+  const tags = useMemo(() => countBy(articles, (a) => (Array.isArray(a.tags) ? a.tags : [])), [articles]);
+  const sources = useMemo(() => countBy(articles, articleSources), [articles]);
+
+  const needle = query.trim().toLowerCase();
   const visibleArticles = useMemo(() => {
-    if (!selectedTag) return articles;
-    return articles.filter((article) => Array.isArray(article.tags) && article.tags.includes(selectedTag));
-  }, [articles, selectedTag]);
-  const handleSelectTag = (tag) => {
-    setSelectedTag(tag);
-    setFilterOpen(false);
+    if (!needle && !selectedTag && !selectedSource) return articles;
+    return articles.filter((article) => {
+      if (selectedTag && !(Array.isArray(article.tags) && article.tags.includes(selectedTag))) return false;
+      if (selectedSource && !articleSources(article).includes(selectedSource)) return false;
+      if (needle && !searchTextOf(article).includes(needle)) return false;
+      return true;
+    });
+  }, [articles, needle, selectedTag, selectedSource]);
+
+  const filtered = Boolean(needle || selectedTag || selectedSource);
+  const clearFilters = () => {
+    setQuery('');
+    setSelectedTag(null);
+    setSelectedSource(null);
   };
 
   useEffect(() => {
@@ -207,9 +287,14 @@ function App({ articles }) {
   useEffect(() => {
     const label = document.getElementById('selected-tag-label');
     if (!label) return;
-    label.hidden = !selectedTag;
-    label.textContent = selectedTag ? `タグ: ${selectedTag}` : '';
-  }, [selectedTag]);
+    const parts = [];
+    if (selectedTag) parts.push(`タグ: ${selectedTag}`);
+    if (selectedSource) parts.push(`ソース: ${selectedSource}`);
+    if (needle) parts.push(`"${query.trim()}"`);
+    if (parts.length > 0) parts.push(`${visibleArticles.length}件`);
+    label.hidden = parts.length === 0;
+    label.textContent = parts.join(' · ');
+  }, [selectedTag, selectedSource, needle, query, visibleArticles.length]);
 
   return h(
     React.Fragment,
@@ -219,15 +304,24 @@ function App({ articles }) {
       { className: 'card-grid', ref: gridRef },
       visibleArticles.map((article, index) => h(ArticleCard, { key: article.url || index, article }))
     ),
-    tags.length > 0
-      ? h(TagFilter, {
-          tags,
-          selectedTag,
-          open: filterOpen,
-          onToggleOpen: () => setFilterOpen((value) => !value),
-          onSelectTag: handleSelectTag,
-        })
-      : null
+    filtered && visibleArticles.length === 0
+      ? h('p', { className: 'app-status' }, '条件に合う記事がありません。')
+      : null,
+    h(FilterPanel, {
+      open: filterOpen,
+      onToggleOpen: () => setFilterOpen((value) => !value),
+      query,
+      onQueryChange: setQuery,
+      tags,
+      selectedTag,
+      onSelectTag: (tag) => setSelectedTag(tag),
+      sources,
+      selectedSource,
+      onSelectSource: (source) => setSelectedSource(source),
+      matchCount: visibleArticles.length,
+      filtered,
+      onClear: clearFilters,
+    })
   );
 }
 
