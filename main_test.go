@@ -58,6 +58,56 @@ func TestHTTPGetBodyRespectsClientTimeout(t *testing.T) {
 	}
 }
 
+func TestCacheEntryRetryBlockedOnlyWithinInterval(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		entry CacheEntry
+		want  bool
+	}{
+		{"失敗記録なし", CacheEntry{}, false},
+		{"直近の失敗", CacheEntry{FailedAt: now.Add(-time.Hour).Format(time.RFC3339)}, true},
+		{"間隔を過ぎた失敗", CacheEntry{FailedAt: now.Add(-48 * time.Hour).Format(time.RFC3339)}, false},
+		{"壊れた時刻", CacheEntry{FailedAt: "not-a-time"}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.entry.retryBlocked(now); got != tc.want {
+			t.Fatalf("%s: retryBlocked = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestCachePruneDropsEntriesUnseenBeyondTTL(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	c := &Cache{entries: map[string]CacheEntry{
+		"https://example.com/fresh":  {SeenAt: now.Add(-24 * time.Hour).Format(time.RFC3339)},
+		"https://example.com/stale":  {SeenAt: now.Add(-30 * 24 * time.Hour).Format(time.RFC3339)},
+		"https://example.com/legacy": {Summary: []string{"SeenAt を持たない旧フォーマット"}},
+	}}
+
+	if removed := c.prune(now); removed != 2 {
+		t.Fatalf("prune removed %d entries, want 2", removed)
+	}
+	if _, ok := c.entries["https://example.com/fresh"]; !ok {
+		t.Fatal("prune dropped a recently seen entry")
+	}
+}
+
+func TestCacheTouchProtectsEntryFromPrune(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	const url = "https://example.com/legacy"
+	c := &Cache{entries: map[string]CacheEntry{url: {Summary: []string{"要約"}}}}
+
+	c.touch([]Article{{URL: url}}, now)
+
+	if removed := c.prune(now); removed != 0 {
+		t.Fatalf("prune removed %d entries after touch, want 0", removed)
+	}
+	if got := c.entries[url].Summary; len(got) != 1 {
+		t.Fatalf("touch clobbered the entry payload: %#v", c.entries[url])
+	}
+}
+
 func TestArticleDateParsesCommonFeedFormats(t *testing.T) {
 	cases := []string{
 		"Thu, 23 Apr 2026 11:00:00 GMT",

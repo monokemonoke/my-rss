@@ -156,9 +156,32 @@ type HNStory struct {
 // ─── Cache ────────────────────────────────────────────────────────────────────
 
 type CacheEntry struct {
-	OGImage string   `json:"og_image,omitempty"` // og:image URL ("-" = not found)
-	Summary []string `json:"summary,omitempty"`  // 3-bullet Japanese summary
-	Tags    []string `json:"tags,omitempty"`     // exactly 3 tags from configured vocabulary
+	OGImage  string   `json:"og_image,omitempty"`  // og:image URL ("-" = not found)
+	Summary  []string `json:"summary,omitempty"`   // 3-bullet Japanese summary
+	Tags     []string `json:"tags,omitempty"`      // exactly 3 tags from configured vocabulary
+	FailedAt string   `json:"failed_at,omitempty"` // 直近の AI 呼び出し失敗時刻 (RFC3339)
+	SeenAt   string   `json:"seen_at,omitempty"`   // 最後に記事一覧へ現れた時刻 (RFC3339)
+}
+
+const (
+	// aiRetryInterval は AI 呼び出しに失敗した記事を再試行するまでの間隔。
+	// 2 時間ごとの実行で毎回同じ記事に失敗し続けるのを防ぐ。
+	aiRetryInterval = 24 * time.Hour
+	// cacheEntryTTL は記事一覧から消えたエントリを保持しておく期間。
+	// フィードの一時的な取得失敗で有効なキャッシュを捨てないよう猶予を持たせる。
+	cacheEntryTTL = 14 * 24 * time.Hour
+)
+
+// retryBlocked は直近の失敗から aiRetryInterval 以内かどうかを返す。
+func (e CacheEntry) retryBlocked(now time.Time) bool {
+	if e.FailedAt == "" {
+		return false
+	}
+	failedAt, err := time.Parse(time.RFC3339, e.FailedAt)
+	if err != nil {
+		return false
+	}
+	return now.Sub(failedAt) < aiRetryInterval
 }
 
 type Cache struct {
@@ -204,6 +227,43 @@ func (c *Cache) set(u string, entry CacheEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[u] = entry
+}
+
+// markFailed は AI 呼び出しの失敗を記録する。以後 aiRetryInterval の間は再試行しない。
+func (c *Cache) markFailed(u string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e := c.entries[u]
+	e.FailedAt = now.Format(time.RFC3339)
+	c.entries[u] = e
+}
+
+// touch は今回の実行で扱った記事に最終参照時刻を記録する。prune の判定材料になる。
+func (c *Cache) touch(articles []Article, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	stamp := now.Format(time.RFC3339)
+	for _, a := range articles {
+		e := c.entries[a.URL]
+		e.SeenAt = stamp
+		c.entries[a.URL] = e
+	}
+}
+
+// prune は最終参照から cacheEntryTTL 以上経過したエントリを削除し、削除件数を返す。
+// SeenAt を持たない旧フォーマットのエントリも対象になる。
+func (c *Cache) prune(now time.Time) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	removed := 0
+	for u, e := range c.entries {
+		seenAt, err := time.Parse(time.RFC3339, e.SeenAt)
+		if err != nil || now.Sub(seenAt) > cacheEntryTTL {
+			delete(c.entries, u)
+			removed++
+		}
+	}
+	return removed
 }
 
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
@@ -1014,15 +1074,23 @@ const summarizeSystemPrompt = `あなたは記事の要約専門アシスタン�
 
 // summarizeArticles は全記事の要約を並列生成する（キャッシュ済みはスキップ）
 func summarizeArticles(articles []Article, client *openai.Client, model string, cache *Cache) []Article {
+	now := time.Now()
 	uncached := make([]int, 0, len(articles))
+	cached, blocked := 0, 0
 	for i := range articles {
-		if e, ok := cache.get(articles[i].URL); ok && len(e.Summary) > 0 {
+		e, ok := cache.get(articles[i].URL)
+		switch {
+		case ok && len(e.Summary) > 0:
 			articles[i].Summary = e.Summary
-		} else {
+			cached++
+		case ok && e.retryBlocked(now):
+			// 直近で失敗しているので、間隔を空けるまで API を呼ばない
+			blocked++
+		default:
 			uncached = append(uncached, i)
 		}
 	}
-	log.Printf("  summarizing %d articles (cached: %d)", len(uncached), len(articles)-len(uncached))
+	log.Printf("  summarizing %d articles (cached: %d, recently failed: %d)", len(uncached), cached, blocked)
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 3) // AI API への同時リクエスト数を制限
@@ -1046,18 +1114,21 @@ func summarizeArticles(articles []Article, client *openai.Client, model string, 
 			content, err := callAI(client, model, summarizeSystemPrompt, prompt)
 			if err != nil {
 				log.Printf("[WARN] summarize %s: %v", a.URL, err)
+				cache.markFailed(a.URL, time.Now())
 				return
 			}
 
 			bullets, err := parseAIStringArray(content)
 			if err != nil {
 				log.Printf("[WARN] summarize JSON parse %s: %v", a.URL, err)
+				cache.markFailed(a.URL, time.Now())
 				return
 			}
 
 			a.Summary = bullets
 			e, _ := cache.get(a.URL)
 			e.Summary = bullets
+			e.FailedAt = ""
 			cache.set(a.URL, e)
 		}(idx)
 	}
@@ -1097,12 +1168,16 @@ func parseAIStringArray(content string) ([]string, error) {
 
 // tagArticles は定義済みタグから各記事に3タグを付与する（キャッシュ済みはスキップ）
 func tagArticles(articles []Article, client *openai.Client, model string, cache *Cache, allowedTags []string) []Article {
+	now := time.Now()
 	uncached := make([]int, 0, len(articles))
+	cached, blocked := 0, 0
 	for i := range articles {
-		if e, ok := cache.get(articles[i].URL); ok && len(e.Tags) > 0 {
-			tags := normalizeArticleTags(e.Tags, allowedTags)
+		entry, ok := cache.get(articles[i].URL)
+		if ok && len(entry.Tags) > 0 {
+			tags := normalizeArticleTags(entry.Tags, allowedTags)
 			if len(tags) == requiredArticleTagCount {
 				articles[i].Tags = tags
+				cached++
 				continue
 			}
 		}
@@ -1110,11 +1185,19 @@ func tagArticles(articles []Article, client *openai.Client, model string, cache 
 		tags := normalizeArticleTags(articles[i].Tags, allowedTags)
 		if len(tags) == requiredArticleTagCount {
 			articles[i].Tags = tags
+			cached++
+			continue
+		}
+
+		if ok && entry.retryBlocked(now) {
+			// 直近で失敗しているので、間隔を空けるまではキーワード推定で埋める
+			articles[i].Tags = fallbackArticleTags(articles[i], allowedTags)
+			blocked++
 			continue
 		}
 		uncached = append(uncached, i)
 	}
-	log.Printf("  tagging %d articles (cached: %d)", len(uncached), len(articles)-len(uncached))
+	log.Printf("  tagging %d articles (cached: %d, recently failed: %d)", len(uncached), cached, blocked)
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 3) // AI API への同時リクエスト数を制限
@@ -1131,6 +1214,7 @@ func tagArticles(articles []Article, client *openai.Client, model string, cache 
 			if err != nil {
 				log.Printf("[WARN] tag %s: %v", a.URL, err)
 				a.Tags = fallbackArticleTags(*a, allowedTags)
+				cache.markFailed(a.URL, time.Now())
 				return
 			}
 
@@ -1138,12 +1222,14 @@ func tagArticles(articles []Article, client *openai.Client, model string, cache 
 			if err != nil {
 				log.Printf("[WARN] tag JSON parse %s: %v", a.URL, err)
 				a.Tags = fallbackArticleTags(*a, allowedTags)
+				cache.markFailed(a.URL, time.Now())
 				return
 			}
 
 			a.Tags = completeArticleTags(values, fallbackArticleTags(*a, allowedTags), allowedTags)
 			e, _ := cache.get(a.URL)
 			e.Tags = a.Tags
+			e.FailedAt = ""
 			cache.set(a.URL, e)
 		}(idx)
 	}
@@ -1456,6 +1542,11 @@ func main() {
 		allArticles = ensureArticleTags(allArticles, allowedTags)
 	}
 
+	cacheNow := time.Now()
+	cache.touch(allArticles, cacheNow)
+	if removed := cache.prune(cacheNow); removed > 0 {
+		log.Printf("Cache: pruned %d stale entries", removed)
+	}
 	cache.save()
 
 	renderData := RenderData{
