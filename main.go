@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	_ "embed"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -1418,23 +1417,19 @@ func renderHTML(path string, renderData RenderData) error {
 	}
 
 	data := struct {
-		Date           string
-		Articles       []Article
-		Sources        []string
-		ArticlesJSON   template.JS
-		CSS            template.CSS
-		JS             template.JS
-		LogoDataURI    template.URL
-		FaviconDataURI template.URL
+		Date         string
+		Articles     []Article
+		Sources      []string
+		ArticlesJSON template.JS
+		CSS          template.CSS
+		JS           template.JS
 	}{
-		Date:           renderData.Date,
-		Articles:       renderData.Articles,
-		Sources:        renderData.Sources,
-		ArticlesJSON:   template.JS(articlesJSON),
-		CSS:            template.CSS(cssContent),
-		JS:             template.JS(jsContent),
-		LogoDataURI:    template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(logoPNG)),
-		FaviconDataURI: template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(faviconPNG)),
+		Date:         renderData.Date,
+		Articles:     renderData.Articles,
+		Sources:      renderData.Sources,
+		ArticlesJSON: template.JS(articlesJSON),
+		CSS:          template.CSS(cssContent),
+		JS:           template.JS(jsContent),
 	}
 
 	f, err := os.Create(path)
@@ -1447,7 +1442,7 @@ func renderHTML(path string, renderData RenderData) error {
 
 // ─── PWA files ────────────────────────────────────────────────────────────────
 
-const swJS = `const CACHE = 'kijiyomu-v1';
+const swJS = `const CACHE = 'kijiyomu-v2';
 
 self.addEventListener('install', () => self.skipWaiting());
 
@@ -1459,17 +1454,28 @@ self.addEventListener('activate', e => {
   );
 });
 
+function store(req, res) {
+  if (res.ok) {
+    const copy = res.clone();
+    caches.open(CACHE).then(c => c.put(req, copy));
+  }
+  return res;
+}
+
 self.addEventListener('fetch', e => {
-  if (e.request.mode !== 'navigate') return;
-  e.respondWith(
-    fetch(e.request)
-      .then(res => {
-        const copy = res.clone();
-        caches.open(CACHE).then(c => c.put(e.request, copy));
-        return res;
-      })
-      .catch(() => caches.match(e.request))
-  );
+  const req = e.request;
+  if (req.method !== 'GET') return;
+
+  // HTML は 2 時間ごとに更新されるので毎回取りに行き、オフライン時だけキャッシュを使う
+  if (req.mode === 'navigate') {
+    e.respondWith(fetch(req).then(res => store(req, res)).catch(() => caches.match(req)));
+    return;
+  }
+
+  // ロゴ・アイコンは内容が変わらないのでキャッシュ優先
+  if (req.destination === 'image' && new URL(req.url).origin === self.location.origin) {
+    e.respondWith(caches.match(req).then(hit => hit || fetch(req).then(res => store(req, res))));
+  }
 });
 `
 
@@ -1481,6 +1487,13 @@ func writePWAFiles(outHTMLPath string) error {
 		return fmt.Errorf("create static dir: %w", err)
 	}
 
+	// HTML から参照するロゴ・ファビコンも出力先へ置く（data URI をやめたため）
+	if err := os.WriteFile(filepath.Join(iconDir, "logo.png"), logoPNG, 0644); err != nil {
+		return fmt.Errorf("write static/logo.png: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(iconDir, "favicon.png"), faviconPNG, 0644); err != nil {
+		return fmt.Errorf("write static/favicon.png: %w", err)
+	}
 	if err := os.WriteFile(filepath.Join(iconDir, "icon-192.png"), faviconPNG, 0644); err != nil {
 		return fmt.Errorf("write static/icon-192.png: %w", err)
 	}
