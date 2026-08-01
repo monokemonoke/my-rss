@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -148,7 +149,7 @@ func TestParseArticleEnrichmentAcceptsFencedJSON(t *testing.T) {
 
 func TestBuildEnrichPromptIncludesProfileAndTags(t *testing.T) {
 	prompt := buildEnrichPrompt(
-		Article{Title: "記事タイトル", Source: "Zenn", URL: "https://example.com/a"},
+		Article{Title: "記事タイトル", Sources: []string{"Zenn"}, URL: "https://example.com/a"},
 		[]string{"LLM/言語モデル", "開発ツール"},
 		testProfile,
 		"本文テキスト",
@@ -299,8 +300,8 @@ func TestCompleteArticleTagsKeepsAllowedUniqueTagsAndFillsToThree(t *testing.T) 
 func TestFallbackArticleTagsReturnsExactlyThreeTags(t *testing.T) {
 	allowed := defaultArticleTags
 	article := Article{
-		Title:  "RustでLLM agent CLIを作る",
-		Source: "Zenn",
+		Title:   "RustでLLM agent CLIを作る",
+		Sources: []string{"Zenn"},
 		Summary: []string{
 			"RustでAIエージェントを実装する開発ツールの記事",
 		},
@@ -319,10 +320,74 @@ func TestDisplaySourceNameShortensArxivQuerySource(t *testing.T) {
 	}
 }
 
-func TestDisplaySourceNameShortensArxivQuerySourceInJoinedSources(t *testing.T) {
-	source := `Zenn / ArXiv Query: search_query=all:"AI agent"&id_list=&start=0&max_results=10`
-	if got := displaySourceName(source); got != "Zenn / ArXiv: AI agent" {
-		t.Fatalf("displaySourceName = %q, want Zenn / ArXiv: AI agent", got)
+func TestNormalizeArticleSourcesShortensEachEntry(t *testing.T) {
+	articles := normalizeArticleSources([]Article{{
+		Sources: []string{
+			"Zenn",
+			`ArXiv Query: search_query=all:"AI agent"&id_list=&start=0&max_results=10`,
+			"Zenn",
+			"  ",
+		},
+	}})
+
+	want := []string{"Zenn", "ArXiv: AI agent"}
+	if len(articles[0].Sources) != len(want) {
+		t.Fatalf("sources = %#v, want %#v", articles[0].Sources, want)
+	}
+	for i := range want {
+		if articles[0].Sources[i] != want[i] {
+			t.Fatalf("sources = %#v, want %#v", articles[0].Sources, want)
+		}
+	}
+}
+
+func TestDeduplicateArticlesMergesSources(t *testing.T) {
+	got := deduplicateArticles([]Article{
+		{Title: "記事", URL: "https://example.com/a?utm_source=x", Sources: []string{"Zenn"}, Score: 3},
+		{Title: "記事", URL: "https://example.com/a", Sources: []string{"はてなブックマーク"}, Score: 12, Date: "2026-08-01T00:00:00Z"},
+		{Title: "別記事", URL: "https://example.com/b", Sources: []string{"Zenn"}},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2: %#v", len(got), got)
+	}
+	if len(got[0].Sources) != 2 || got[0].Sources[0] != "Zenn" || got[0].Sources[1] != "はてなブックマーク" {
+		t.Fatalf("sources = %#v, want [Zenn はてなブックマーク]", got[0].Sources)
+	}
+	if got[0].Score != 12 {
+		t.Fatalf("score = %d, want 12 (higher of the two)", got[0].Score)
+	}
+	if got[0].Date != "2026-08-01T00:00:00Z" {
+		t.Fatalf("date = %q, want the one that was present", got[0].Date)
+	}
+}
+
+func TestArticleUnmarshalJSONReadsLegacySourceString(t *testing.T) {
+	var article Article
+	raw := `{"title":"記事","url":"https://example.com/a","source":"Zenn / はてなブックマーク"}`
+	if err := json.Unmarshal([]byte(raw), &article); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	want := []string{"Zenn", "はてなブックマーク"}
+	if len(article.Sources) != len(want) {
+		t.Fatalf("sources = %#v, want %#v", article.Sources, want)
+	}
+	for i := range want {
+		if article.Sources[i] != want[i] {
+			t.Fatalf("sources = %#v, want %#v", article.Sources, want)
+		}
+	}
+}
+
+func TestArticleUnmarshalJSONPrefersSourcesArray(t *testing.T) {
+	var article Article
+	raw := `{"title":"記事","sources":["Zenn"],"source":"無視される"}`
+	if err := json.Unmarshal([]byte(raw), &article); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(article.Sources) != 1 || article.Sources[0] != "Zenn" {
+		t.Fatalf("sources = %#v, want [Zenn]", article.Sources)
 	}
 }
 

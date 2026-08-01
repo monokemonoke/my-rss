@@ -89,13 +89,39 @@ func loadConfig(path string) (*Config, error) {
 type Article struct {
 	Title     string   `json:"title"`
 	URL       string   `json:"url"`
-	Source    string   `json:"source"`
+	Sources   []string `json:"sources"`             // 同一記事を配信していたフィード名
 	Score     int      `json:"score,omitempty"`     // points/bookmarks
 	OGImage   string   `json:"og_image,omitempty"`  // og:image URL
 	Date      string   `json:"date,omitempty"`      // RFC3339 published date
 	Summary   []string `json:"summary,omitempty"`   // 3-bullet Japanese summary
 	Tags      []string `json:"tags,omitempty"`      // exactly 3 tags from configured vocabulary
 	Relevance int      `json:"relevance,omitempty"` // プロフィールへの関連度 0-100
+}
+
+const (
+	// articleSchemaVersion は中間 JSON のスキーマ版。3 で source から sources へ移行した。
+	articleSchemaVersion = 3
+	// legacySourceSeparator は Sources 導入前に複数ソースを 1 つの文字列へ
+	// 結合するのに使っていた区切り。
+	legacySourceSeparator = " / "
+)
+
+// UnmarshalJSON は旧スキーマの "source": "Zenn / はてブ" を Sources として読み込む。
+// 中間 JSON は Actions のキャッシュ経由で世代をまたぐため、移行期間の互換が要る。
+func (a *Article) UnmarshalJSON(data []byte) error {
+	type articleAlias Article // UnmarshalJSON の再帰を避けるための別名
+	aux := struct {
+		LegacySource string `json:"source"`
+		*articleAlias
+	}{articleAlias: (*articleAlias)(a)}
+
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(a.Sources) == 0 && aux.LegacySource != "" {
+		a.Sources = uniqueTrimmedStrings(strings.Split(aux.LegacySource, legacySourceSeparator))
+	}
+	return nil
 }
 
 type RenderData struct {
@@ -368,25 +394,21 @@ var reArxivQuerySource = regexp.MustCompile(`^ArXiv Query:\s*search_query=all:"(
 
 func displaySourceName(source string) string {
 	source = strings.TrimSpace(source)
-	if source == "" {
-		return ""
+	if match := reArxivQuerySource.FindStringSubmatch(source); len(match) == 2 {
+		return "ArXiv: " + match[1]
 	}
-
-	parts := strings.Split(source, " / ")
-	for i, part := range parts {
-		part = strings.TrimSpace(part)
-		if match := reArxivQuerySource.FindStringSubmatch(part); len(match) == 2 {
-			parts[i] = "ArXiv: " + match[1]
-		} else {
-			parts[i] = part
-		}
-	}
-	return strings.Join(parts, " / ")
+	return source
 }
 
 func normalizeArticleSources(articles []Article) []Article {
 	for i := range articles {
-		articles[i].Source = displaySourceName(articles[i].Source)
+		sources := make([]string, 0, len(articles[i].Sources))
+		for _, source := range articles[i].Sources {
+			if name := displaySourceName(source); name != "" {
+				sources = append(sources, name)
+			}
+		}
+		articles[i].Sources = uniqueTrimmedStrings(sources)
 	}
 	return articles
 }
@@ -618,7 +640,7 @@ func completeArticleTags(tags, fallback, allowedTags []string) []string {
 func fallbackArticleTags(article Article, allowedTags []string) []string {
 	text := strings.ToLower(strings.Join([]string{
 		article.Title,
-		article.Source,
+		strings.Join(article.Sources, " "),
 		strings.Join(article.Summary, " "),
 		article.URL,
 	}, " "))
@@ -734,10 +756,10 @@ func fetchRSS(rawURL, source string) []Article {
 			continue
 		}
 		articles = append(articles, Article{
-			Title:  strings.TrimSpace(item.Title),
-			URL:    strings.TrimSpace(link),
-			Source: source,
-			Date:   articleDate(firstNonEmpty(item.PubDate, item.Date, item.Published, item.Updated)),
+			Title:   strings.TrimSpace(item.Title),
+			URL:     strings.TrimSpace(link),
+			Sources: []string{source},
+			Date:    articleDate(firstNonEmpty(item.PubDate, item.Date, item.Published, item.Updated)),
 		})
 	}
 	return articles
@@ -758,10 +780,10 @@ func fetchAtom(rawURL, source string) []Article {
 	var articles []Article
 	for _, e := range feed.Entries {
 		articles = append(articles, Article{
-			Title:  strings.TrimSpace(e.Title),
-			URL:    strings.TrimSpace(e.Link.Href),
-			Source: source,
-			Date:   articleDate(firstNonEmpty(e.Published, e.Updated)),
+			Title:   strings.TrimSpace(e.Title),
+			URL:     strings.TrimSpace(e.Link.Href),
+			Sources: []string{source},
+			Date:    articleDate(firstNonEmpty(e.Published, e.Updated)),
 		})
 	}
 	return articles
@@ -805,11 +827,11 @@ func fetchHN(limit int) []Article {
 				story.URL = fmt.Sprintf("https://news.ycombinator.com/item?id=%d", story.ID)
 			}
 			ch <- result{idx, Article{
-				Title:  story.Title,
-				URL:    story.URL,
-				Source: "Hacker News",
-				Score:  story.Score,
-				Date:   formatArticleDate(time.Unix(story.Time, 0)),
+				Title:   story.Title,
+				URL:     story.URL,
+				Sources: []string{"Hacker News"},
+				Score:   story.Score,
+				Date:    formatArticleDate(time.Unix(story.Time, 0)),
 			}}
 		}(i, id)
 	}
@@ -841,10 +863,10 @@ func fetchRDF(rawURL, source string) []Article {
 			continue
 		}
 		articles = append(articles, Article{
-			Title:  strings.TrimSpace(item.Title),
-			URL:    strings.TrimSpace(item.Link),
-			Source: source,
-			Date:   articleDate(item.Date),
+			Title:   strings.TrimSpace(item.Title),
+			URL:     strings.TrimSpace(item.Link),
+			Sources: []string{source},
+			Date:    articleDate(item.Date),
 		})
 	}
 	return articles
@@ -910,10 +932,10 @@ func fetchAnthropicNews(rawURL, source string) []Article {
 			}
 			seen[fullURL] = true
 			articles = append(articles, Article{
-				Title:  title,
-				URL:    fullURL,
-				Source: source,
-				Date:   date,
+				Title:   title,
+				URL:     fullURL,
+				Sources: []string{source},
+				Date:    date,
 			})
 		}
 	}
@@ -943,50 +965,32 @@ func normalizeURL(rawURL string) string {
 	return strings.TrimRight(result, "/")
 }
 
-// deduplicateArticles は同じ URL の記事をまとめ、ソース名を結合する
+// deduplicateArticles は同じ URL の記事を 1 つにまとめ、配信元を集約する
 func deduplicateArticles(articles []Article) []Article {
-	type group struct {
-		article Article
-		sources []string
-	}
-	seen := make(map[string]int) // normalizedURL → index in groups
-	groups := make([]group, 0, len(articles))
+	seen := make(map[string]int, len(articles)) // normalizedURL → merged のインデックス
+	merged := make([]Article, 0, len(articles))
 
 	for _, a := range articles {
 		key := normalizeURL(a.URL)
-		if idx, ok := seen[key]; ok {
-			// 既存グループにソースを追加、スコアは高い方を採用
-			g := &groups[idx]
-			// 重複しないソースのみ追加
-			alreadyHas := false
-			for _, s := range g.sources {
-				if s == a.Source {
-					alreadyHas = true
-					break
-				}
-			}
-			if !alreadyHas {
-				g.sources = append(g.sources, a.Source)
-			}
-			if a.Score > g.article.Score {
-				g.article.Score = a.Score
-			}
-			if g.article.Date == "" {
-				g.article.Date = a.Date
-			}
-		} else {
-			seen[key] = len(groups)
-			groups = append(groups, group{article: a, sources: []string{a.Source}})
+		idx, ok := seen[key]
+		if !ok {
+			a.Sources = uniqueTrimmedStrings(a.Sources)
+			seen[key] = len(merged)
+			merged = append(merged, a)
+			continue
+		}
+
+		// 配信元は足し合わせ、スコアは高い方、日付は先に取れた方を採用する
+		target := &merged[idx]
+		target.Sources = uniqueTrimmedStrings(append(target.Sources, a.Sources...))
+		if a.Score > target.Score {
+			target.Score = a.Score
+		}
+		if target.Date == "" {
+			target.Date = a.Date
 		}
 	}
-
-	result := make([]Article, len(groups))
-	for i, g := range groups {
-		a := g.article
-		a.Source = strings.Join(g.sources, " / ")
-		result[i] = a
-	}
-	return result
+	return merged
 }
 
 func filterRecentArticles(articles []Article, months int, now time.Time) []Article {
@@ -1229,7 +1233,7 @@ func buildEnrichPrompt(article Article, allowedTags []string, profile, text stri
 		fmt.Fprintf(&b, "読者プロフィール:\n%s\n\n", strings.TrimSpace(profile))
 	}
 	fmt.Fprintf(&b, "候補タグ:\n- %s\n\n", strings.Join(allowedTags, "\n- "))
-	fmt.Fprintf(&b, "タイトル: %s\nソース: %s\nURL: %s\n", article.Title, article.Source, article.URL)
+	fmt.Fprintf(&b, "タイトル: %s\nソース: %s\nURL: %s\n", article.Title, strings.Join(article.Sources, ", "), article.URL)
 	if text != "" {
 		fmt.Fprintf(&b, "\n本文:\n%s", text)
 	}
@@ -1364,7 +1368,9 @@ func applyFallbackEnrichment(article *Article, allowedTags []string, kw profileK
 func collectSources(articles []Article) []string {
 	sourceSet := map[string]bool{}
 	for _, a := range articles {
-		sourceSet[a.Source] = true
+		for _, source := range a.Sources {
+			sourceSet[source] = true
+		}
 	}
 	var sources []string
 	for s := range sourceSet {
@@ -1570,7 +1576,7 @@ func main() {
 			log.Fatalf("load intermediate data: %v", err)
 		}
 		now := time.Now()
-		renderData.SchemaVersion = 2
+		renderData.SchemaVersion = articleSchemaVersion
 		renderData.Articles = normalizeArticleSources(renderData.Articles)
 		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, now)
 		renderData.Articles = ensureArticleTags(renderData.Articles, allowedTags)
@@ -1677,7 +1683,7 @@ func main() {
 	cache.save()
 
 	renderData := RenderData{
-		SchemaVersion: 2,
+		SchemaVersion: articleSchemaVersion,
 		Date:          time.Now().In(time.FixedZone("JST", 9*60*60)).Format("2006-01-02 15:04"),
 		Articles:      allArticles,
 		Sources:       collectSources(allArticles),

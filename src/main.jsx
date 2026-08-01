@@ -54,9 +54,17 @@ function Thumb({ article }) {
   );
 }
 
+function articleSources(article) {
+  if (Array.isArray(article.sources)) return article.sources;
+  // 旧スキーマ: "Zenn / はてなブックマーク" の 1 本の文字列
+  if (typeof article.source === 'string' && article.source) return article.source.split(' / ');
+  return [];
+}
+
 function ArticleCard({ article }) {
   const bullets = Array.isArray(article.summary) ? article.summary : [];
   const tags = Array.isArray(article.tags) ? article.tags.slice(0, 3) : [];
+  const sources = articleSources(article);
   const openArticle = (event) => {
     if (!article.url || event.target.closest('a, button')) return;
     window.open(article.url, '_blank', 'noopener');
@@ -68,7 +76,7 @@ function ArticleCard({ article }) {
 
   return h(
     'article',
-    { className: 'card', 'data-source': article.source },
+    { className: 'card' },
     h(Thumb, { article }),
     h(
       'div',
@@ -79,7 +87,7 @@ function ArticleCard({ article }) {
       h(
         'div',
         { className: 'card-meta' },
-        h('span', { className: 'source-tag' }, article.source),
+        ...sources.map((source) => h('span', { className: 'source-tag', key: source }, source)),
         ...tags.map((tag) => h('span', { className: 'article-tag', key: tag }, tag)),
         article.date ? h('time', { className: 'published-date', dateTime: article.date }, dateLabel(article.date)) : null,
         article.score > 0 ? h('span', { className: 'hn-score' }, `▲${article.score}`) : null
