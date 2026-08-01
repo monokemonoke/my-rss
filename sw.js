@@ -22,8 +22,9 @@ self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;
 
-  // HTML は 2 時間ごとに更新されるので毎回取りに行き、オフライン時だけキャッシュを使う
-  if (req.mode === 'navigate') {
+  // HTML と記事データは 2 時間ごとに更新されるので毎回取りに行き、
+  // オフライン時だけキャッシュを使う
+  if (req.mode === 'navigate' || new URL(req.url).pathname.endsWith('/data.json')) {
     e.respondWith(fetch(req).then(res => store(req, res)).catch(() => caches.match(req)));
     return;
   }

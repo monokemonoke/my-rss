@@ -39,9 +39,7 @@ jobs:
       - name: Restore KijiYomu cache
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          path: |
-            .kijiyomu_cache.json
-            data.json
+          path: .kijiyomu_cache.json
           key: kijiyomu-cache-${{ github.run_id }}
           restore-keys: |
             kijiyomu-cache-
@@ -51,16 +49,14 @@ jobs:
           AI_API_BASE: ${{ secrets.AI_API_BASE }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_MODEL: ${{ secrets.AI_MODEL }}
-        run: go run main.go --data-out data.json
+        run: go run main.go
 
       # 常に最新状態で保存（key に run_id を含めることで毎回新規保存）
       - name: Save KijiYomu cache
         if: always()
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          path: |
-            .kijiyomu_cache.json
-            data.json
+          path: .kijiyomu_cache.json
           key: kijiyomu-cache-${{ github.run_id }}
 
       - name: Prepare Pages artifact
@@ -68,7 +64,7 @@ jobs:
           mkdir -p _site
           cp kijiyomu.html _site/index.html
           cp kijiyomu.html _site/kijiyomu.html
-          cp manifest.json sw.js apple-touch-icon.png _site/
+          cp data.json manifest.json sw.js apple-touch-icon.png _site/
           cp -R static _site/static
 
       - name: Upload Pages artifact

@@ -61,6 +61,7 @@ dotenvx run -- ./kijiyomu --out feed.html
 | `--api-key` | `AI_API_KEY` | (なし) | API キー |
 | `--model` | `AI_MODEL` | `gpt-4o-mini` | モデル名 |
 | `--out` | | `kijiyomu.html` | 出力 HTML ファイル名 |
+| `--inline-data` | | (off) | 記事 JSON を HTML に埋め込む（`data.json` を出さない） |
 | `--data-in` | | (なし) | 中間 JSON を読み込んで HTML だけ生成 |
 | `--data-out` | | (なし) | 取得・要約後の中間 JSON を保存 |
 | `--cache-file` | | `.kijiyomu_cache.json` | キャッシュファイルのパス |
@@ -76,10 +77,12 @@ dotenvx run -- go run main.go --data-out kijiyomu-data.json
 
 # 2. デザイン変更後に HTML を再生成
 pnpm run build
-go run main.go --data-in kijiyomu-data.json --out kijiyomu.html
+go run main.go --data-in kijiyomu-data.json --inline-data --out kijiyomu.html
 ```
 
 `--data-in` 指定時はフィード取得・OG 画像取得・AI 要約をすべてスキップします。
+
+記事データは通常 `data.json` として HTML の隣に出力され、ブラウザが `fetch` で読み込みます。`file://` で直接開くと `fetch` がブロックされるため、ローカルで確認するときは `--inline-data` を付けて HTML に埋め込んでください。
 
 ## 設定（kijiyomu.yaml）
 
@@ -156,7 +159,7 @@ feeds:
 - **カードグリッド表示** — OG イメージ付きのカード形式
 - **AI 要約** — 各記事の要点を日本語3箇条で表示
 - **関連度順の並び** — `profile` との関連度と公開日から算出したスコアの降順
-- **React 仮想スクロール** — 静的 HTML に記事 JSON を埋め込み、表示範囲のカードだけ描画
+- **記事データの分離配信** — HTML とは別の `data.json` を読み込むため、更新のたびに再取得するのは記事データだけ
 - **キーボード操作** — `j`/`k`/`h`/`l` でカード移動、Enter で記事を開く
 - **直近記事のみ表示** — 公開日が取れる記事は直近2か月分に絞り込み
 - **重複排除** — 同一 URL の記事は複数ソースをまとめて表示

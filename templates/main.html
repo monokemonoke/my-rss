@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>KijiYomu - {{.Date}}</title>
 <link rel="icon" type="image/png" href="static/favicon.png">
+{{if not .InlineArticles}}<link rel="preload" as="fetch" href="{{.DataURL}}" crossorigin="anonymous">{{end}}
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#F8F8FB" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0F0F12" media="(prefers-color-scheme: dark)">
@@ -27,7 +28,7 @@
 <script>(function(){var t=document.documentElement.dataset.theme;document.getElementById('theme-toggle').textContent=t==='dark'?'☀':'☾';})()</script>
 <div id="articles-root"></div>
 </div>
-<script id="articles-data" type="application/json">{{.ArticlesJSON}}</script>
+{{if .InlineArticles}}<script id="articles-data" type="application/json">{{.ArticlesJSON}}</script>{{end}}
 <script type="module">{{.JS}}</script>
 <script>if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js');</script>
 </body>

@@ -44,14 +44,15 @@ var faviconPNG []byte
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
 var CLI struct {
-	APIBase   string `help:"OpenAI-compatible API host URL" env:"AI_API_BASE"`
-	APIKey    string `help:"API key (optional)" env:"AI_API_KEY"`
-	Model     string `help:"Model name" env:"AI_MODEL" default:"gpt-4o-mini"`
-	Out       string `help:"Output HTML file" default:"kijiyomu.html"`
-	DataIn    string `help:"Read intermediate JSON and render HTML without fetching"`
-	DataOut   string `help:"Write intermediate JSON after fetching"`
-	CacheFile string `help:"Cache file" default:".kijiyomu_cache.json"`
-	Config    string `help:"Feed config YAML file" default:"kijiyomu.yaml"`
+	APIBase    string `help:"OpenAI-compatible API host URL" env:"AI_API_BASE"`
+	APIKey     string `help:"API key (optional)" env:"AI_API_KEY"`
+	Model      string `help:"Model name" env:"AI_MODEL" default:"gpt-4o-mini"`
+	Out        string `help:"Output HTML file" default:"kijiyomu.html"`
+	InlineData bool   `help:"Embed the article JSON in the HTML instead of writing data.json alongside it"`
+	DataIn     string `help:"Read intermediate JSON and render HTML without fetching"`
+	DataOut    string `help:"Write intermediate JSON after fetching"`
+	CacheFile  string `help:"Cache file" default:".kijiyomu_cache.json"`
+	Config     string `help:"Feed config YAML file" default:"kijiyomu.yaml"`
 }
 
 // ─── Feed config ───────────────────────────────────────────────────────────────
@@ -1406,30 +1407,54 @@ func saveRenderData(path string, renderData RenderData) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-func renderHTML(path string, renderData RenderData) error {
+// writeArticleData は HTML と同じディレクトリへ配信用の data.json を書き出す。
+// 中間 JSON (--data-out) と違い、転送量を抑えるため整形しない。
+func writeArticleData(outHTMLPath string, renderData RenderData) error {
+	data, err := json.Marshal(renderData)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(filepath.Dir(outHTMLPath), articleDataFileName), data, 0644)
+}
+
+// articleDataFileName は HTML の隣に置く配信用データのファイル名。
+const articleDataFileName = "data.json"
+
+// renderHTML は HTML を書き出す。inlineArticles が false のときは記事 JSON を
+// 埋め込まず、別ファイルの data.json をブラウザ側で取得させる。
+func renderHTML(path string, renderData RenderData, inlineArticles bool) error {
 	funcMap := template.FuncMap{
 		"dateLabel": dateLabel,
 	}
 	tmpl := template.Must(template.New("feed").Funcs(funcMap).Parse(htmlTmpl))
-	articlesJSON, err := json.Marshal(renderData.Articles)
-	if err != nil {
-		return err
+
+	var articlesJSON template.JS
+	if inlineArticles {
+		encoded, err := json.Marshal(renderData.Articles)
+		if err != nil {
+			return err
+		}
+		articlesJSON = template.JS(encoded)
 	}
 
 	data := struct {
-		Date         string
-		Articles     []Article
-		Sources      []string
-		ArticlesJSON template.JS
-		CSS          template.CSS
-		JS           template.JS
+		Date           string
+		Articles       []Article
+		Sources        []string
+		InlineArticles bool
+		ArticlesJSON   template.JS
+		DataURL        string
+		CSS            template.CSS
+		JS             template.JS
 	}{
-		Date:         renderData.Date,
-		Articles:     renderData.Articles,
-		Sources:      renderData.Sources,
-		ArticlesJSON: template.JS(articlesJSON),
-		CSS:          template.CSS(cssContent),
-		JS:           template.JS(jsContent),
+		Date:           renderData.Date,
+		Articles:       renderData.Articles,
+		Sources:        renderData.Sources,
+		InlineArticles: inlineArticles,
+		ArticlesJSON:   articlesJSON,
+		DataURL:        articleDataFileName,
+		CSS:            template.CSS(cssContent),
+		JS:             template.JS(jsContent),
 	}
 
 	f, err := os.Create(path)
@@ -1466,8 +1491,9 @@ self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;
 
-  // HTML は 2 時間ごとに更新されるので毎回取りに行き、オフライン時だけキャッシュを使う
-  if (req.mode === 'navigate') {
+  // HTML と記事データは 2 時間ごとに更新されるので毎回取りに行き、
+  // オフライン時だけキャッシュを使う
+  if (req.mode === 'navigate' || new URL(req.url).pathname.endsWith('/data.json')) {
     e.respondWith(fetch(req).then(res => store(req, res)).catch(() => caches.match(req)));
     return;
   }
@@ -1602,8 +1628,13 @@ func main() {
 			}
 			log.Printf("Written data: %s (%d articles)", CLI.DataOut, len(renderData.Articles))
 		}
-		if err := renderHTML(CLI.Out, *renderData); err != nil {
+		if err := renderHTML(CLI.Out, *renderData, CLI.InlineData); err != nil {
 			log.Fatalf("render HTML: %v", err)
+		}
+		if !CLI.InlineData {
+			if err := writeArticleData(CLI.Out, *renderData); err != nil {
+				log.Fatalf("write article data: %v", err)
+			}
 		}
 		if err := writePWAFiles(CLI.Out); err != nil {
 			log.Printf("[WARN] PWA files: %v", err)
@@ -1707,8 +1738,13 @@ func main() {
 		}
 		log.Printf("Written data: %s (%d articles)", CLI.DataOut, len(renderData.Articles))
 	}
-	if err := renderHTML(CLI.Out, renderData); err != nil {
+	if err := renderHTML(CLI.Out, renderData, CLI.InlineData); err != nil {
 		log.Fatalf("render HTML: %v", err)
+	}
+	if !CLI.InlineData {
+		if err := writeArticleData(CLI.Out, renderData); err != nil {
+			log.Fatalf("write article data: %v", err)
+		}
 	}
 	if err := writePWAFiles(CLI.Out); err != nil {
 		log.Printf("[WARN] PWA files: %v", err)

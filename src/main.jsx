@@ -16,10 +16,21 @@ function hashInt(str) {
   return Math.abs(h);
 }
 
-function readArticles() {
+const DATA_URL = './data.json';
+
+// 記事は既定では data.json として配信される。--inline-data で生成した HTML の
+// 場合だけ script タグに埋め込まれているので、それを先に見る。
+function readInlineArticles() {
   const el = document.getElementById('articles-data');
-  if (!el) return [];
-  try { return JSON.parse(el.textContent || '[]'); } catch { return []; }
+  if (!el) return null;
+  try { return JSON.parse(el.textContent || '[]'); } catch { return null; }
+}
+
+async function fetchArticles() {
+  const res = await fetch(DATA_URL);
+  if (!res.ok) throw new Error(`${DATA_URL}: ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data.articles) ? data.articles : [];
 }
 
 function dateLabel(raw) {
@@ -220,4 +231,25 @@ function App({ articles }) {
   );
 }
 
-createRoot(document.getElementById('articles-root')).render(h(App, { articles: readArticles() }));
+const inlineArticles = readInlineArticles();
+
+function Root() {
+  const [state, setState] = useState(
+    inlineArticles ? { status: 'ready', articles: inlineArticles } : { status: 'loading', articles: [] }
+  );
+
+  useEffect(() => {
+    if (inlineArticles) return undefined;
+    let alive = true;
+    fetchArticles()
+      .then((articles) => { if (alive) setState({ status: 'ready', articles }); })
+      .catch(() => { if (alive) setState({ status: 'error', articles: [] }); });
+    return () => { alive = false; };
+  }, []);
+
+  if (state.status === 'loading') return h('p', { className: 'app-status' }, '記事を読み込んでいます…');
+  if (state.status === 'error') return h('p', { className: 'app-status' }, '記事を読み込めませんでした。時間をおいて再読み込みしてください。');
+  return h(App, { articles: state.articles });
+}
+
+createRoot(document.getElementById('articles-root')).render(h(Root));
