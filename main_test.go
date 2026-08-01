@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -55,6 +56,132 @@ func TestHTTPGetBodyRespectsClientTimeout(t *testing.T) {
 	client := &http.Client{Timeout: 30 * time.Millisecond}
 	if _, err := httpGetBody(client, srv.URL, "", 1024); err == nil {
 		t.Fatal("httpGetBody returned nil error for a hanging server")
+	}
+}
+
+const testProfile = `- 言語/技術: Rust, Go, TypeScript
+- 分野: LLM/AIエージェント, ゲーム開発(ブラウザゲーム/Phaser3)
+- 関心低め: スポーツ`
+
+func TestParseProfileKeywordsSplitsPositiveAndNegative(t *testing.T) {
+	kw := parseProfileKeywords(testProfile)
+
+	wantPositive := []string{"rust", "go", "typescript", "llm", "aiエージェント", "ゲーム開発", "ブラウザゲーム", "phaser3"}
+	if len(kw.positive) != len(wantPositive) {
+		t.Fatalf("positive = %#v, want %#v", kw.positive, wantPositive)
+	}
+	for i := range wantPositive {
+		if kw.positive[i] != wantPositive[i] {
+			t.Fatalf("positive = %#v, want %#v", kw.positive, wantPositive)
+		}
+	}
+	if len(kw.negative) != 1 || kw.negative[0] != "スポーツ" {
+		t.Fatalf("negative = %#v, want [スポーツ]", kw.negative)
+	}
+}
+
+func TestParseProfileKeywordsOnEmptyProfile(t *testing.T) {
+	if kw := parseProfileKeywords(""); !kw.empty() {
+		t.Fatalf("parseProfileKeywords(\"\") = %#v, want empty", kw)
+	}
+}
+
+func TestFallbackRelevanceScoresMatchesAndPenalisesDislikes(t *testing.T) {
+	kw := parseProfileKeywords(testProfile)
+
+	matching := fallbackRelevance(Article{
+		Title:   "RustでLLMエージェントを書く",
+		Tags:    []string{"AIエージェント", "プログラミング言語", "開発ツール"},
+		Summary: []string{"Rust で書かれたエージェント基盤の紹介"},
+	}, kw)
+	if matching <= neutralRelevance {
+		t.Fatalf("relevance = %d, want > %d for a matching article", matching, neutralRelevance)
+	}
+
+	disliked := fallbackRelevance(Article{
+		Title: "スポーツ観戦アプリの作り方",
+		Tags:  []string{"モバイル", "プロダクト/事例", "その他"},
+	}, kw)
+	if disliked >= neutralRelevance {
+		t.Fatalf("relevance = %d, want < %d for a disliked article", disliked, neutralRelevance)
+	}
+
+	unrelated := fallbackRelevance(Article{Title: "確定申告の話"}, kw)
+	if unrelated != neutralRelevance {
+		t.Fatalf("relevance = %d, want %d for an unrelated article", unrelated, neutralRelevance)
+	}
+}
+
+func TestFallbackRelevanceIsNeutralWithoutProfile(t *testing.T) {
+	got := fallbackRelevance(Article{Title: "Rust"}, profileKeywords{})
+	if got != neutralRelevance {
+		t.Fatalf("relevance = %d, want %d", got, neutralRelevance)
+	}
+}
+
+func TestSortArticlesByRankPrefersRelevantAndRecent(t *testing.T) {
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	articles := []Article{
+		{Title: "古くて関連度が高い", Date: "2026-07-04T00:00:00Z", Relevance: 90},
+		{Title: "新しくて関連度が中くらい", Date: "2026-07-31T00:00:00Z", Relevance: 60},
+		{Title: "新しいが関連度が低い", Date: "2026-08-01T00:00:00Z", Relevance: 10},
+	}
+
+	got := sortArticlesByRank(articles, now)
+	want := []string{"新しくて関連度が中くらい", "新しいが関連度が低い", "古くて関連度が高い"}
+	for i := range want {
+		if got[i].Title != want[i] {
+			t.Fatalf("order = [%s, %s, %s], want %v", got[0].Title, got[1].Title, got[2].Title, want)
+		}
+	}
+}
+
+func TestParseArticleEnrichmentAcceptsFencedJSON(t *testing.T) {
+	got, err := parseArticleEnrichment("```json\n{\"summary\":[\"a\",\"b\",\"c\"],\"tags\":[\"LLM/言語モデル\"],\"relevance\":72}\n```")
+	if err != nil {
+		t.Fatalf("parseArticleEnrichment: %v", err)
+	}
+	if len(got.Summary) != 3 || got.Relevance != 72 || len(got.Tags) != 1 {
+		t.Fatalf("parsed = %#v", got)
+	}
+}
+
+func TestBuildEnrichPromptIncludesProfileAndTags(t *testing.T) {
+	prompt := buildEnrichPrompt(
+		Article{Title: "記事タイトル", Source: "Zenn", URL: "https://example.com/a"},
+		[]string{"LLM/言語モデル", "開発ツール"},
+		testProfile,
+		"本文テキスト",
+	)
+	for _, want := range []string{"読者プロフィール", "関心低め", "LLM/言語モデル", "記事タイトル", "本文テキスト"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt does not contain %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestApplyCachedEnrichmentFillsMissingRelevance(t *testing.T) {
+	kw := parseProfileKeywords(testProfile)
+	article := Article{Title: "Rust で LLM エージェント"}
+	entry := CacheEntry{
+		Summary: []string{"要点"},
+		Tags:    []string{"LLM/言語モデル", "開発ツール", "研究/論文"},
+	}
+
+	if !applyCachedEnrichment(&article, entry, defaultArticleTags, kw) {
+		t.Fatal("applyCachedEnrichment returned false for a complete entry")
+	}
+	if article.Relevance == 0 {
+		t.Fatal("relevance was left unset for a pre-relevance cache entry")
+	}
+}
+
+func TestApplyCachedEnrichmentRejectsIncompleteEntry(t *testing.T) {
+	article := Article{Title: "記事"}
+	entry := CacheEntry{Summary: []string{"要点"}, Tags: []string{"LLM/言語モデル"}}
+
+	if applyCachedEnrichment(&article, entry, defaultArticleTags, profileKeywords{}) {
+		t.Fatal("applyCachedEnrichment accepted an entry with fewer than 3 tags")
 	}
 }
 

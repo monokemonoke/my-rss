@@ -11,6 +11,7 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -65,8 +66,10 @@ type FeedConfig struct {
 }
 
 type Config struct {
-	Feeds []FeedConfig `yaml:"feeds"`
-	Tags  []string     `yaml:"tags"`
+	// Profile は読者の興味関心の記述。AI の関連度判定とキーワード概算の両方で使う。
+	Profile string       `yaml:"profile"`
+	Feeds   []FeedConfig `yaml:"feeds"`
+	Tags    []string     `yaml:"tags"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -84,14 +87,15 @@ func loadConfig(path string) (*Config, error) {
 // ─── Data types ───────────────────────────────────────────────────────────────
 
 type Article struct {
-	Title   string   `json:"title"`
-	URL     string   `json:"url"`
-	Source  string   `json:"source"`
-	Score   int      `json:"score,omitempty"`    // points/bookmarks
-	OGImage string   `json:"og_image,omitempty"` // og:image URL
-	Date    string   `json:"date,omitempty"`     // RFC3339 published date
-	Summary []string `json:"summary,omitempty"`  // 3-bullet Japanese summary
-	Tags    []string `json:"tags,omitempty"`     // exactly 3 tags from configured vocabulary
+	Title     string   `json:"title"`
+	URL       string   `json:"url"`
+	Source    string   `json:"source"`
+	Score     int      `json:"score,omitempty"`     // points/bookmarks
+	OGImage   string   `json:"og_image,omitempty"`  // og:image URL
+	Date      string   `json:"date,omitempty"`      // RFC3339 published date
+	Summary   []string `json:"summary,omitempty"`   // 3-bullet Japanese summary
+	Tags      []string `json:"tags,omitempty"`      // exactly 3 tags from configured vocabulary
+	Relevance int      `json:"relevance,omitempty"` // プロフィールへの関連度 0-100
 }
 
 type RenderData struct {
@@ -156,11 +160,12 @@ type HNStory struct {
 // ─── Cache ────────────────────────────────────────────────────────────────────
 
 type CacheEntry struct {
-	OGImage  string   `json:"og_image,omitempty"`  // og:image URL ("-" = not found)
-	Summary  []string `json:"summary,omitempty"`   // 3-bullet Japanese summary
-	Tags     []string `json:"tags,omitempty"`      // exactly 3 tags from configured vocabulary
-	FailedAt string   `json:"failed_at,omitempty"` // 直近の AI 呼び出し失敗時刻 (RFC3339)
-	SeenAt   string   `json:"seen_at,omitempty"`   // 最後に記事一覧へ現れた時刻 (RFC3339)
+	OGImage   string   `json:"og_image,omitempty"`  // og:image URL ("-" = not found)
+	Summary   []string `json:"summary,omitempty"`   // 3-bullet Japanese summary
+	Tags      []string `json:"tags,omitempty"`      // exactly 3 tags from configured vocabulary
+	Relevance int      `json:"relevance,omitempty"` // プロフィールへの関連度 0-100（0 = 未評価）
+	FailedAt  string   `json:"failed_at,omitempty"` // 直近の AI 呼び出し失敗時刻 (RFC3339)
+	SeenAt    string   `json:"seen_at,omitempty"`   // 最後に記事一覧へ現れた時刻 (RFC3339)
 }
 
 const (
@@ -383,6 +388,146 @@ func normalizeArticleSources(articles []Article) []Article {
 	for i := range articles {
 		articles[i].Source = displaySourceName(articles[i].Source)
 	}
+	return articles
+}
+
+// ─── Relevance ────────────────────────────────────────────────────────────────
+
+const (
+	// neutralRelevance は関連度を判定できなかった記事に与える既定値。
+	neutralRelevance = 50
+	// relevanceHalfLifeDays は並び替えスコアが半減するまでの日数。
+	// 関連度がやや低くても新しい記事が上に来るようにするための減衰。
+	relevanceHalfLifeDays = 7.0
+	// profileKeywordBonus はプロフィールの語 1 つの一致で加算する点数。
+	profileKeywordBonus = 12
+	// profileKeywordPenalty は「関心低め」の語が一致したときに引く点数。
+	profileKeywordPenalty = 30
+)
+
+// profileKeywords はプロフィール記述から取り出した、関連度概算用の語。
+type profileKeywords struct {
+	positive []string
+	negative []string
+}
+
+var reProfileLine = regexp.MustCompile(`^\s*[-*]\s*([^:：]+)[:：]\s*(.+)$`)
+
+// splitProfileValues は "Rust, Go" や "ゲーム開発(ブラウザゲーム/Phaser3)" のような
+// 記述を個々の語に分解する。
+func splitProfileValues(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		switch r {
+		case ',', '、', '/', '・', '(', ')', '（', '）', '「', '」':
+			return true
+		}
+		return false
+	})
+
+	values := make([]string, 0, len(fields))
+	for _, f := range fields {
+		v := strings.ToLower(strings.TrimSpace(f))
+		// 1 文字の語はどの記事にも当たってしまうため捨てる
+		if len([]rune(v)) < 2 {
+			continue
+		}
+		values = append(values, v)
+	}
+	return values
+}
+
+// parseProfileKeywords は "- 分野: LLM, ゲーム開発" 形式のプロフィールを語に分解する。
+// ラベルに「関心低」を含む行はネガティブ側に振り分ける。
+func parseProfileKeywords(profile string) profileKeywords {
+	var kw profileKeywords
+	for _, line := range strings.Split(profile, "\n") {
+		m := reProfileLine.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		label := m[1]
+		if strings.Contains(label, "関心低") || strings.Contains(label, "興味なし") || strings.Contains(label, "興味無し") {
+			kw.negative = append(kw.negative, splitProfileValues(m[2])...)
+			continue
+		}
+		kw.positive = append(kw.positive, splitProfileValues(m[2])...)
+	}
+	return kw
+}
+
+func (k profileKeywords) empty() bool {
+	return len(k.positive) == 0 && len(k.negative) == 0
+}
+
+// fallbackRelevance は AI を使わずに、プロフィールの語との重なりで関連度を概算する。
+// AI 未設定時と、関連度を持たない古いキャッシュの穴埋めに使う。
+func fallbackRelevance(article Article, kw profileKeywords) int {
+	if kw.empty() {
+		return neutralRelevance
+	}
+
+	haystack := strings.ToLower(strings.Join(append([]string{
+		article.Title,
+		strings.Join(article.Tags, " "),
+	}, article.Summary...), " "))
+
+	score := neutralRelevance
+	for _, word := range kw.positive {
+		if strings.Contains(haystack, word) {
+			score += profileKeywordBonus
+		}
+	}
+	for _, word := range kw.negative {
+		if strings.Contains(haystack, word) {
+			score -= profileKeywordPenalty
+		}
+	}
+
+	return clampRelevance(score)
+}
+
+func clampRelevance(score int) int {
+	switch {
+	case score < 0:
+		return 0
+	case score > 100:
+		return 100
+	default:
+		return score
+	}
+}
+
+// ensureArticleRelevance は関連度が未設定の記事をキーワード概算で埋める。
+func ensureArticleRelevance(articles []Article, kw profileKeywords) []Article {
+	for i := range articles {
+		if articles[i].Relevance == 0 {
+			articles[i].Relevance = fallbackRelevance(articles[i], kw)
+		}
+	}
+	return articles
+}
+
+// rankScore は関連度を経過日数で減衰させた並び替え用スコアを返す。
+func rankScore(a Article, now time.Time) float64 {
+	relevance := float64(a.Relevance)
+	published, ok := parseArticleDate(a.Date)
+	if !ok {
+		// 日付不明は減衰の基準が無いので割り引いて中位に置く
+		return relevance * 0.5
+	}
+
+	ageDays := now.Sub(published).Hours() / 24
+	if ageDays < 0 {
+		ageDays = 0
+	}
+	return relevance * math.Pow(0.5, ageDays/relevanceHalfLifeDays)
+}
+
+// sortArticlesByRank は関連度 × 新しさの順に並べ替える。
+func sortArticlesByRank(articles []Article, now time.Time) []Article {
+	sort.SliceStable(articles, func(i, j int) bool {
+		return rankScore(articles[i], now) > rankScore(articles[j], now)
+	})
 	return articles
 }
 
@@ -844,18 +989,6 @@ func deduplicateArticles(articles []Article) []Article {
 	return result
 }
 
-func sortArticlesByDate(articles []Article) []Article {
-	sort.SliceStable(articles, func(i, j int) bool {
-		ti, oki := parseArticleDate(articles[i].Date)
-		tj, okj := parseArticleDate(articles[j].Date)
-		if oki && okj {
-			return ti.After(tj)
-		}
-		return oki && !okj // 日付なし記事は末尾へ
-	})
-	return articles
-}
-
 func filterRecentArticles(articles []Article, months int, now time.Time) []Article {
 	cutoff := now.AddDate(0, -months, 0)
 	filtered := articles[:0]
@@ -1067,30 +1200,81 @@ func fetchArticleText(rawURL string) string {
 	return ""
 }
 
-const summarizeSystemPrompt = `あなたは記事の要約専門アシスタントです。
-与えられた記事の内容を日本語で3点の箇条書きにまとめてください。
-必ずJSON配列のみ返すこと。説明文・前置き・コードブロック記法は不要。
-例: ["要点1の説明", "要点2の説明", "要点3の説明"]`
+const enrichSystemPrompt = `あなたは技術記事のキュレーションアシスタントです。
+与えられた記事について次の3つを判定し、JSONオブジェクトのみを返してください。
 
-// summarizeArticles は全記事の要約を並列生成する（キャッシュ済みはスキップ）
-func summarizeArticles(articles []Article, client *openai.Client, model string, cache *Cache) []Article {
+- summary: 記事の要点を日本語で3点にまとめた文字列の配列
+- tags: 提示された候補タグから重複なしで選んだちょうど3つの文字列の配列
+- relevance: 読者プロフィールへの関連度を表す0〜100の整数
+
+relevance は読者プロフィールとの一致度です。プロフィールの言語・分野・製品に
+強く重なる記事は高く、「関心低め」に該当する記事は低くしてください。
+判断材料が乏しい場合は50前後にしてください。
+
+説明文・前置き・コードブロック記法は不要。
+例: {"summary":["要点1","要点2","要点3"],"tags":["AI/LLM","開発ツール","研究/論文"],"relevance":72}`
+
+// articleEnrichment は enrichSystemPrompt に対する AI の応答。
+type articleEnrichment struct {
+	Summary   []string `json:"summary"`
+	Tags      []string `json:"tags"`
+	Relevance int      `json:"relevance"`
+}
+
+const maxArticleTextLen = 4000
+
+func buildEnrichPrompt(article Article, allowedTags []string, profile, text string) string {
+	var b strings.Builder
+	if strings.TrimSpace(profile) != "" {
+		fmt.Fprintf(&b, "読者プロフィール:\n%s\n\n", strings.TrimSpace(profile))
+	}
+	fmt.Fprintf(&b, "候補タグ:\n- %s\n\n", strings.Join(allowedTags, "\n- "))
+	fmt.Fprintf(&b, "タイトル: %s\nソース: %s\nURL: %s\n", article.Title, article.Source, article.URL)
+	if text != "" {
+		fmt.Fprintf(&b, "\n本文:\n%s", text)
+	}
+	return b.String()
+}
+
+// trimAIJSONFence はコードブロック記法で包まれた応答から中身を取り出す。
+func trimAIJSONFence(content string) string {
+	content = strings.TrimSpace(content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	return strings.TrimSpace(content)
+}
+
+func parseArticleEnrichment(content string) (articleEnrichment, error) {
+	var result articleEnrichment
+	if err := json.Unmarshal([]byte(trimAIJSONFence(content)), &result); err != nil {
+		return articleEnrichment{}, err
+	}
+	return result, nil
+}
+
+// enrichArticles は要約・タグ・関連度を 1 回の AI 呼び出しでまとめて求める。
+// 記事ごとに要約とタグで 2 回呼んでいたものを 1 回に減らしている。
+func enrichArticles(articles []Article, client *openai.Client, model string, cache *Cache, allowedTags []string, profile string, kw profileKeywords) []Article {
 	now := time.Now()
 	uncached := make([]int, 0, len(articles))
 	cached, blocked := 0, 0
+
 	for i := range articles {
-		e, ok := cache.get(articles[i].URL)
-		switch {
-		case ok && len(e.Summary) > 0:
-			articles[i].Summary = e.Summary
+		entry, ok := cache.get(articles[i].URL)
+		if ok && applyCachedEnrichment(&articles[i], entry, allowedTags, kw) {
 			cached++
-		case ok && e.retryBlocked(now):
-			// 直近で失敗しているので、間隔を空けるまで API を呼ばない
-			blocked++
-		default:
-			uncached = append(uncached, i)
+			continue
 		}
+		if ok && entry.retryBlocked(now) {
+			// 直近で失敗しているので、間隔を空けるまで API を呼ばずキーワード推定で埋める
+			applyFallbackEnrichment(&articles[i], allowedTags, kw)
+			blocked++
+			continue
+		}
+		uncached = append(uncached, i)
 	}
-	log.Printf("  summarizing %d articles (cached: %d, recently failed: %d)", len(uncached), cached, blocked)
+	log.Printf("  enriching %d articles (cached: %d, recently failed: %d)", len(uncached), cached, blocked)
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 3) // AI API への同時リクエスト数を制限
@@ -1104,137 +1288,75 @@ func summarizeArticles(articles []Article, client *openai.Client, model string, 
 
 			a := &articles[i]
 			text := fetchArticleText(a.URL)
-			const maxTextLen = 4000
-			if len([]rune(text)) > maxTextLen {
-				runes := []rune(text)
-				text = string(runes[:maxTextLen])
+			if runes := []rune(text); len(runes) > maxArticleTextLen {
+				text = string(runes[:maxArticleTextLen])
 			}
 
-			prompt := fmt.Sprintf("タイトル: %s\n\n本文:\n%s", a.Title, text)
-			content, err := callAI(client, model, summarizeSystemPrompt, prompt)
+			prompt := buildEnrichPrompt(*a, allowedTags, profile, text)
+			content, err := callAI(client, model, enrichSystemPrompt, prompt)
 			if err != nil {
-				log.Printf("[WARN] summarize %s: %v", a.URL, err)
+				log.Printf("[WARN] enrich %s: %v", a.URL, err)
+				applyFallbackEnrichment(a, allowedTags, kw)
 				cache.markFailed(a.URL, time.Now())
 				return
 			}
 
-			bullets, err := parseAIStringArray(content)
+			result, err := parseArticleEnrichment(content)
 			if err != nil {
-				log.Printf("[WARN] summarize JSON parse %s: %v", a.URL, err)
+				log.Printf("[WARN] enrich JSON parse %s: %v", a.URL, err)
+				applyFallbackEnrichment(a, allowedTags, kw)
 				cache.markFailed(a.URL, time.Now())
 				return
 			}
 
-			a.Summary = bullets
+			a.Summary = result.Summary
+			a.Tags = completeArticleTags(result.Tags, fallbackArticleTags(*a, allowedTags), allowedTags)
+			a.Relevance = clampRelevance(result.Relevance)
+			if a.Relevance == 0 {
+				a.Relevance = fallbackRelevance(*a, kw)
+			}
+
 			e, _ := cache.get(a.URL)
-			e.Summary = bullets
-			e.FailedAt = ""
-			cache.set(a.URL, e)
-		}(idx)
-	}
-	wg.Wait()
-	return articles
-}
-
-const tagSystemPrompt = `あなたは技術記事のタグ分類アシスタントです。
-ユーザーが提示する候補タグの中から、記事に最も合うタグを重複なしで必ず3つ選んでください。
-必ずJSON配列のみ返すこと。説明文・前置き・コードブロック記法は不要。
-例: ["AI/LLM", "開発ツール", "プロダクト/事例"]`
-
-func buildTagPrompt(article Article, allowedTags []string) string {
-	return fmt.Sprintf(
-		"候補タグ:\n- %s\n\nタイトル: %s\nソース: %s\nURL: %s\n要約:\n- %s",
-		strings.Join(allowedTags, "\n- "),
-		article.Title,
-		article.Source,
-		article.URL,
-		strings.Join(article.Summary, "\n- "),
-	)
-}
-
-func parseAIStringArray(content string) ([]string, error) {
-	content = strings.TrimSpace(content)
-	content = strings.TrimPrefix(content, "```json")
-	content = strings.TrimPrefix(content, "```")
-	content = strings.TrimSuffix(content, "```")
-	content = strings.TrimSpace(content)
-
-	var values []string
-	if err := json.Unmarshal([]byte(content), &values); err != nil {
-		return nil, err
-	}
-	return values, nil
-}
-
-// tagArticles は定義済みタグから各記事に3タグを付与する（キャッシュ済みはスキップ）
-func tagArticles(articles []Article, client *openai.Client, model string, cache *Cache, allowedTags []string) []Article {
-	now := time.Now()
-	uncached := make([]int, 0, len(articles))
-	cached, blocked := 0, 0
-	for i := range articles {
-		entry, ok := cache.get(articles[i].URL)
-		if ok && len(entry.Tags) > 0 {
-			tags := normalizeArticleTags(entry.Tags, allowedTags)
-			if len(tags) == requiredArticleTagCount {
-				articles[i].Tags = tags
-				cached++
-				continue
-			}
-		}
-
-		tags := normalizeArticleTags(articles[i].Tags, allowedTags)
-		if len(tags) == requiredArticleTagCount {
-			articles[i].Tags = tags
-			cached++
-			continue
-		}
-
-		if ok && entry.retryBlocked(now) {
-			// 直近で失敗しているので、間隔を空けるまではキーワード推定で埋める
-			articles[i].Tags = fallbackArticleTags(articles[i], allowedTags)
-			blocked++
-			continue
-		}
-		uncached = append(uncached, i)
-	}
-	log.Printf("  tagging %d articles (cached: %d, recently failed: %d)", len(uncached), cached, blocked)
-
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 3) // AI API への同時リクエスト数を制限
-
-	for _, idx := range uncached {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			a := &articles[i]
-			content, err := callAI(client, model, tagSystemPrompt, buildTagPrompt(*a, allowedTags))
-			if err != nil {
-				log.Printf("[WARN] tag %s: %v", a.URL, err)
-				a.Tags = fallbackArticleTags(*a, allowedTags)
-				cache.markFailed(a.URL, time.Now())
-				return
-			}
-
-			values, err := parseAIStringArray(content)
-			if err != nil {
-				log.Printf("[WARN] tag JSON parse %s: %v", a.URL, err)
-				a.Tags = fallbackArticleTags(*a, allowedTags)
-				cache.markFailed(a.URL, time.Now())
-				return
-			}
-
-			a.Tags = completeArticleTags(values, fallbackArticleTags(*a, allowedTags), allowedTags)
-			e, _ := cache.get(a.URL)
+			e.Summary = a.Summary
 			e.Tags = a.Tags
+			e.Relevance = a.Relevance
 			e.FailedAt = ""
 			cache.set(a.URL, e)
 		}(idx)
 	}
 	wg.Wait()
 	return articles
+}
+
+// applyCachedEnrichment はキャッシュ済みの要約・タグを記事へ写す。
+// 揃っていなければ false を返して AI 呼び出しに回す。
+// 関連度だけが欠けている場合は、関連度導入前のキャッシュとみなして概算で埋める。
+func applyCachedEnrichment(article *Article, entry CacheEntry, allowedTags []string, kw profileKeywords) bool {
+	if len(entry.Summary) == 0 {
+		return false
+	}
+	tags := normalizeArticleTags(entry.Tags, allowedTags)
+	if len(tags) != requiredArticleTagCount {
+		return false
+	}
+
+	article.Summary = entry.Summary
+	article.Tags = tags
+	article.Relevance = entry.Relevance
+	if article.Relevance == 0 {
+		article.Relevance = fallbackRelevance(*article, kw)
+	}
+	return true
+}
+
+// applyFallbackEnrichment は AI を使えないときにタグと関連度だけでも埋める。
+func applyFallbackEnrichment(article *Article, allowedTags []string, kw profileKeywords) {
+	if len(normalizeArticleTags(article.Tags, allowedTags)) != requiredArticleTagCount {
+		article.Tags = fallbackArticleTags(*article, allowedTags)
+	}
+	if article.Relevance == 0 {
+		article.Relevance = fallbackRelevance(*article, kw)
+	}
 }
 
 // ─── HTML output ──────────────────────────────────────────────────────────────
@@ -1429,6 +1551,11 @@ func main() {
 		feedCfg = cfg
 	}
 	allowedTags := configuredArticleTags(feedCfg)
+	profile := ""
+	if feedCfg != nil {
+		profile = feedCfg.Profile
+	}
+	profileWords := parseProfileKeywords(profile)
 
 	var aiClient *openai.Client
 	if CLI.APIBase != "" {
@@ -1442,11 +1569,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("load intermediate data: %v", err)
 		}
+		now := time.Now()
 		renderData.SchemaVersion = 2
 		renderData.Articles = normalizeArticleSources(renderData.Articles)
-		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, time.Now())
-		renderData.Articles = sortArticlesByDate(renderData.Articles)
+		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, now)
 		renderData.Articles = ensureArticleTags(renderData.Articles, allowedTags)
+		renderData.Articles = ensureArticleRelevance(renderData.Articles, profileWords)
+		renderData.Articles = sortArticlesByRank(renderData.Articles, now)
 		renderData.Sources = collectSources(renderData.Articles)
 		if CLI.DataOut != "" {
 			if err := saveRenderData(CLI.DataOut, *renderData); err != nil {
@@ -1526,21 +1655,19 @@ func main() {
 	allArticles = filterRecentArticles(allArticles, recentArticleMonths, time.Now())
 	log.Printf("After recent filter: %d articles (removed %d older than %d months)", len(allArticles), before-len(allArticles), recentArticleMonths)
 
-	allArticles = sortArticlesByDate(allArticles)
-
 	// OG image fetch (all articles, cached)
 	log.Println("Fetching OG images...")
 	allArticles = fetchOGImages(allArticles, cache)
 
-	// AI summarization
+	// AI enrichment: 要約・タグ・関連度をまとめて 1 回で求める
 	if aiClient != nil {
-		log.Printf("Summarizing with AI (model: %s)...", CLI.Model)
-		allArticles = summarizeArticles(allArticles, aiClient, CLI.Model, cache)
-		log.Printf("Tagging with AI (model: %s)...", CLI.Model)
-		allArticles = tagArticles(allArticles, aiClient, CLI.Model, cache, allowedTags)
+		log.Printf("Enriching with AI (model: %s)...", CLI.Model)
+		allArticles = enrichArticles(allArticles, aiClient, CLI.Model, cache, allowedTags, profile, profileWords)
 	} else {
 		allArticles = ensureArticleTags(allArticles, allowedTags)
 	}
+	allArticles = ensureArticleRelevance(allArticles, profileWords)
+	allArticles = sortArticlesByRank(allArticles, time.Now())
 
 	cacheNow := time.Now()
 	cache.touch(allArticles, cacheNow)
