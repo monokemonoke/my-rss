@@ -1,9 +1,62 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+func TestHTTPGetBodySendsUserAgentAndTruncatesAtLimit(t *testing.T) {
+	var gotUA, gotAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotAccept = r.Header.Get("Accept")
+		_, _ = w.Write([]byte("0123456789"))
+	}))
+	defer srv.Close()
+
+	body, err := httpGetBody(srv.Client(), srv.URL, "text/html", 4)
+	if err != nil {
+		t.Fatalf("httpGetBody: %v", err)
+	}
+	if string(body) != "0123" {
+		t.Fatalf("body = %q, want 0123", body)
+	}
+	if gotUA != userAgent {
+		t.Fatalf("User-Agent = %q, want %q", gotUA, userAgent)
+	}
+	if gotAccept != "text/html" {
+		t.Fatalf("Accept = %q, want text/html", gotAccept)
+	}
+}
+
+func TestHTTPGetBodyFailsOnNon2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	if _, err := httpGetBody(srv.Client(), srv.URL, "", 1024); err == nil {
+		t.Fatal("httpGetBody returned nil error for 404")
+	}
+}
+
+func TestHTTPGetBodyRespectsClientTimeout(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	defer func() {
+		close(release)
+		srv.Close()
+	}()
+
+	client := &http.Client{Timeout: 30 * time.Millisecond}
+	if _, err := httpGetBody(client, srv.URL, "", 1024); err == nil {
+		t.Fatal("httpGetBody returned nil error for a hanging server")
+	}
+}
 
 func TestArticleDateParsesCommonFeedFormats(t *testing.T) {
 	cases := []string{

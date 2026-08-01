@@ -206,7 +206,58 @@ func (c *Cache) set(u string, entry CacheEntry) {
 	c.entries[u] = entry
 }
 
+// ─── HTTP ─────────────────────────────────────────────────────────────────────
+
+const userAgent = "Mozilla/5.0 (compatible; kijiyomu/1.0)"
+
+const (
+	feedFetchTimeout = 20 * time.Second
+	pageFetchTimeout = 15 * time.Second
+	aiRequestTimeout = 120 * time.Second
+)
+
+const (
+	feedBodyLimit    = 8 * 1024 * 1024
+	newsPageLimit    = 2 * 1024 * 1024
+	articleTextLimit = 256 * 1024
+	ogImageLimit     = 64 * 1024
+)
+
+var (
+	// feedClient はフィード API 用。ページ取得より少し長めに待つ。
+	feedClient = &http.Client{Timeout: feedFetchTimeout}
+	// pageClient は記事ページ・OG イメージ取得用。
+	pageClient = &http.Client{Timeout: pageFetchTimeout}
+)
+
+// httpGetBody は共通の User-Agent とタイムアウトで GET し、limit バイトまで本文を読む。
+// タイムアウトのないデフォルトクライアントを使うと 1 本の応答なしフィードでジョブ全体が
+// 止まるため、取得系はすべてこれを経由させる。
+func httpGetBody(client *http.Client, rawURL, accept string, limit int64) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("status %s", resp.Status)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, limit))
+}
+
 // ─── Fetchers ─────────────────────────────────────────────────────────────────
+
+const feedAccept = "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.8"
 
 const recentArticleMonths = 2
 const requiredArticleTagCount = 3
@@ -460,13 +511,11 @@ func articleDate(raw string) string {
 }
 
 func fetchRSS(rawURL, source string) []Article {
-	resp, err := http.Get(rawURL)
+	body, err := httpGetBody(feedClient, rawURL, feedAccept, feedBodyLimit)
 	if err != nil {
 		log.Printf("[WARN] %s: %v", source, err)
 		return nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
 
 	var feed RSSFeed
 	if err := xml.Unmarshal(body, &feed); err != nil {
@@ -490,13 +539,11 @@ func fetchRSS(rawURL, source string) []Article {
 }
 
 func fetchAtom(rawURL, source string) []Article {
-	resp, err := http.Get(rawURL)
+	body, err := httpGetBody(feedClient, rawURL, feedAccept, feedBodyLimit)
 	if err != nil {
 		log.Printf("[WARN] %s: %v", source, err)
 		return nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
 
 	var feed AtomFeed
 	if err := xml.Unmarshal(body, &feed); err != nil {
@@ -516,14 +563,13 @@ func fetchAtom(rawURL, source string) []Article {
 }
 
 func fetchHN(limit int) []Article {
-	resp, err := http.Get("https://hacker-news.firebaseio.com/v0/topstories.json")
+	body, err := httpGetBody(feedClient, "https://hacker-news.firebaseio.com/v0/topstories.json", "application/json", feedBodyLimit)
 	if err != nil {
 		log.Printf("[WARN] HN topstories: %v", err)
 		return nil
 	}
-	defer func() { _ = resp.Body.Close() }()
 	var ids []int
-	if err := json.NewDecoder(resp.Body).Decode(&ids); err != nil {
+	if err := json.Unmarshal(body, &ids); err != nil {
 		log.Printf("[WARN] HN decode ids: %v", err)
 		return nil
 	}
@@ -542,13 +588,12 @@ func fetchHN(limit int) []Article {
 		go func(idx, id int) {
 			defer wg.Done()
 			rawURL := fmt.Sprintf("https://hacker-news.firebaseio.com/v0/item/%d.json", id)
-			r, err := http.Get(rawURL)
+			itemBody, err := httpGetBody(feedClient, rawURL, "application/json", feedBodyLimit)
 			if err != nil {
 				return
 			}
-			defer func() { _ = r.Body.Close() }()
 			var story HNStory
-			if err := json.NewDecoder(r.Body).Decode(&story); err != nil {
+			if err := json.Unmarshal(itemBody, &story); err != nil {
 				return
 			}
 			if story.URL == "" {
@@ -574,13 +619,11 @@ func fetchHN(limit int) []Article {
 }
 
 func fetchRDF(rawURL, source string) []Article {
-	resp, err := http.Get(rawURL)
+	body, err := httpGetBody(feedClient, rawURL, feedAccept, feedBodyLimit)
 	if err != nil {
 		log.Printf("[WARN] %s: %v", source, err)
 		return nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
 
 	var feed RDFFeed
 	if err := xml.Unmarshal(body, &feed); err != nil {
@@ -603,24 +646,11 @@ func fetchRDF(rawURL, source string) []Article {
 }
 
 func fetchAnthropicNews(rawURL, source string) []Article {
-	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequest("GET", rawURL, nil)
+	body, err := httpGetBody(pageClient, rawURL, "text/html", newsPageLimit)
 	if err != nil {
 		log.Printf("[WARN] %s: %v", source, err)
 		return nil
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; kijiyomu/1.0)")
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[WARN] %s: %v", source, err)
-		return nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("[WARN] %s: status %s", source, resp.Status)
-		return nil
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	page := string(body)
 
 	base, err := url.Parse(rawURL)
@@ -786,20 +816,10 @@ func filterRecentArticles(articles []Article, months int, now time.Time) []Artic
 
 // fetchOGImage はページの og:image URL を返す。見つからない場合は空文字。
 func fetchOGImage(rawURL string) string {
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("GET", rawURL, nil)
+	body, err := httpGetBody(pageClient, rawURL, "text/html", ogImageLimit)
 	if err != nil {
 		return ""
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; kijiyomu/1.0)")
-	req.Header.Set("Accept", "text/html")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	lower := strings.ToLower(string(body))
 
 	// <meta property="og:image" content="..."> を探す（順不同属性に対応）
@@ -898,7 +918,10 @@ func newAIClient(apiBase, apiKey string) *openai.Client {
 }
 
 func callAI(client *openai.Client, model, system, userMsg string) (string, error) {
-	resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
+	ctx, cancel := context.WithTimeout(context.Background(), aiRequestTimeout)
+	defer cancel()
+
+	resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 		Model: model,
 		Messages: []openai.ChatCompletionMessage{
 			{Role: openai.ChatMessageRoleSystem, Content: system},
@@ -965,30 +988,18 @@ func articleTextURLs(rawURL string) []string {
 	return []string{rawURL}
 }
 
-func fetchPlainText(client *http.Client, rawURL string) string {
-	req, err := http.NewRequest("GET", rawURL, nil)
+func fetchPlainText(rawURL string) string {
+	body, err := httpGetBody(pageClient, rawURL, "text/html", articleTextLimit)
 	if err != nil {
 		return ""
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; kijiyomu/1.0)")
-	req.Header.Set("Accept", "text/html")
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 {
-		return ""
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	return stripHTML(string(body))
 }
 
 // fetchArticleText は記事ページのプレーンテキストを取得する
 func fetchArticleText(rawURL string) string {
-	client := &http.Client{Timeout: 15 * time.Second}
 	for _, candidateURL := range articleTextURLs(rawURL) {
-		text := fetchPlainText(client, candidateURL)
+		text := fetchPlainText(candidateURL)
 		if text != "" {
 			return text
 		}
