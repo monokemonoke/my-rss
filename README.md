@@ -159,49 +159,6 @@ feeds:
 
 キャッシュ（AI 要約・OG イメージ）は `actions/cache` で runs をまたいで保持されます。
 
-## PWA プッシュ通知
+## PWA
 
-Cloudflare Worker + KV にブラウザの `PushSubscription` を保存し、GitHub Actions が新着記事を検出したときに Web Push を送ります。
-
-### 1. VAPID キーを作成
-
-```bash
-pnpm exec web-push generate-vapid-keys
-```
-
-### 2. Cloudflare Worker を用意
-
-`workers/push-subscriptions/` を Cloudflare Workers にデプロイします。`wrangler.toml` の KV namespace ID を実際の値に置き換えてください。
-
-Worker variables/secrets:
-
-| 名前 | 内容 |
-|---|---|
-| `PUSH_ADMIN_TOKEN` | GitHub Actions から購読一覧を取得するための任意の長いトークン |
-| `ALLOWED_ORIGIN` | GitHub Pages の origin。例: `https://user.github.io` |
-
-KV binding:
-
-| Binding | 内容 |
-|---|---|
-| `PUSH_SUBSCRIPTIONS` | PushSubscription 保存用 KV namespace |
-
-### 3. GitHub に Variables / Secrets を設定
-
-Repository Variables:
-
-| 名前 | 内容 |
-|---|---|
-| `PUSH_WORKER_URL` | Cloudflare Worker の URL |
-| `VAPID_PUBLIC_KEY` | VAPID public key |
-| `VAPID_SUBJECT` | `mailto:you@example.com` など |
-| `SITE_URL` | 通知クリック時に開く GitHub Pages の URL |
-
-Repository Secrets:
-
-| 名前 | 内容 |
-|---|---|
-| `PUSH_ADMIN_TOKEN` | Worker secret と同じ値 |
-| `VAPID_PRIVATE_KEY` | VAPID private key |
-
-これらが未設定の場合、GitHub Actions は通知送信だけスキップします。PWA 側の通知ボタンも `PUSH_WORKER_URL` と `VAPID_PUBLIC_KEY` が HTML に埋め込まれている場合だけ表示されます。
+`manifest.json` と `sw.js` を出力するため、ホーム画面に追加してスタンドアロン起動できます。Service Worker はナビゲーションリクエストをキャッシュするので、オフラインでも直近に開いた内容を表示できます。

@@ -46,37 +46,12 @@ jobs:
           restore-keys: |
             kijiyomu-cache-
 
-      - name: Preserve previous data snapshot
-        run: |
-          if [ -f data.json ]; then
-            cp data.json previous-data.json
-          fi
-
       - name: Run KijiYomu
         env:
           AI_API_BASE: ${{ secrets.AI_API_BASE }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_MODEL: ${{ secrets.AI_MODEL }}
-          PUSH_WORKER_URL: ${{ vars.PUSH_WORKER_URL }}
-          VAPID_PUBLIC_KEY: ${{ vars.VAPID_PUBLIC_KEY }}
         run: go run main.go --data-out data.json
-
-      - name: Notify new articles
-        env:
-          PUSH_WORKER_URL: ${{ vars.PUSH_WORKER_URL }}
-          PUSH_ADMIN_TOKEN: ${{ secrets.PUSH_ADMIN_TOKEN }}
-          VAPID_PUBLIC_KEY: ${{ vars.VAPID_PUBLIC_KEY }}
-          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
-          VAPID_SUBJECT: ${{ vars.VAPID_SUBJECT }}
-          SITE_URL: ${{ vars.SITE_URL }}
-          PREVIOUS_DATA: previous-data.json
-          CURRENT_DATA: data.json
-        run: |
-          if [ -z "$PUSH_WORKER_URL" ] || [ -z "$PUSH_ADMIN_TOKEN" ] || [ -z "$VAPID_PUBLIC_KEY" ] || [ -z "$VAPID_PRIVATE_KEY" ]; then
-            echo "Push notification settings are incomplete; skipping."
-            exit 0
-          fi
-          pnpm run notify:new-articles
 
       # 常に最新状態で保存（key に run_id を含めることで毎回新規保存）
       - name: Save KijiYomu cache

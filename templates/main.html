@@ -28,12 +28,6 @@
 <div id="articles-root"></div>
 </div>
 <script id="articles-data" type="application/json">{{.ArticlesJSON}}</script>
-<script>
-window.KIJIYOMU_PUSH = {
-  endpoint: {{.PushEndpoint}},
-  vapidPublicKey: {{.VAPIDPublicKey}}
-};
-</script>
 <script type="module">{{.JS}}</script>
 <script>if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js');</script>
 </body>

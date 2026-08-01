@@ -1,8 +1,0 @@
-name = "kijiyomu-push-subscriptions"
-main = "src/index.js"
-compatibility_date = "2026-06-27"
-
-[[kv_namespaces]]
-binding = "PUSH_SUBSCRIPTIONS"
-id = "cc63328a05bb44a889ce4c891d1e8a9d"
-preview_id = "cc63328a05bb44a889ce4c891d1e8a9d"
