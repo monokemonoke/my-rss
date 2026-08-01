@@ -58,7 +58,6 @@ var CLI struct {
 // ─── Feed config ───────────────────────────────────────────────────────────────
 
 type FeedConfig struct {
-	ID    string `yaml:"id"`
 	Name  string `yaml:"name"`
 	Type  string `yaml:"type"` // hn, rss, atom, rdf, anthropic
 	URL   string `yaml:"url"`
@@ -1457,6 +1456,9 @@ func renderHTML(path string, renderData RenderData, inlineArticles bool) error {
 		JS:             template.JS(jsContent),
 	}
 
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
 	f, err := os.Create(path)
 	if err != nil {
 		return err

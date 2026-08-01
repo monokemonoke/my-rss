@@ -1,6 +1,6 @@
 # KijiYomu
 
-複数の技術系フィードから記事を収集し、AI が各記事の要点を日本語3箇条で要約して HTML カードビューで出力する CLI ツール。
+複数の技術系フィードから記事を集め、AI が要約・タグ付け・興味との関連度判定をまとめて行い、カード形式のビューを生成する CLI ツール。出力は静的ファイルだけなので、そのまま GitHub Pages に置けます。
 
 ## セットアップ
 
@@ -10,10 +10,9 @@ pnpm run build
 go build -o kijiyomu .
 ```
 
-dotenvx を使う場合:
+`.env` を作って dotenvx 経由で実行すると、API キーを環境変数で渡せます。
 
 ```bash
-cp .env.example .env  # または手動で作成
 dotenvx run -- go run main.go
 ```
 
@@ -46,12 +45,24 @@ go run main.go --data-in kijiyomu-data.json --out kijiyomu.html
 ### その他の例
 
 ```bash
-# AI 要約なし（API 設定不要）
+# AI 要約なし（API 設定不要）。関連度はキーワード一致で概算する
 ./kijiyomu
 
-# 出力ファイル名を指定
-dotenvx run -- ./kijiyomu --out feed.html
+# 出力先を指定。存在しないディレクトリは自動で作られる
+dotenvx run -- ./kijiyomu --out _site/index.html
 ```
+
+### 出力されるファイル
+
+`--out` で指定した HTML の隣に、配信に必要なものが一式そろいます。
+
+| ファイル | 内容 |
+|---|---|
+| `index.html`（`--out` の名前） | ページ本体。CSS と JS はインライン |
+| `data.json` | 記事データ。ブラウザが `fetch` で読む |
+| `manifest.json` / `sw.js` | PWA 用 |
+| `static/logo.png` ほか | ロゴ・アイコン |
+| `apple-touch-icon.png` | iOS ホーム画面用 |
 
 ## オプション一覧
 
@@ -105,7 +116,9 @@ profile: |
 
 ```yaml
 tags:
-  - AI/LLM
+  - LLM/言語モデル
+  - 生成AI
+  - ML/機械学習
   - AIエージェント
   - 研究/論文
   - 開発ツール
@@ -116,9 +129,7 @@ tags:
   - データベース
   - セキュリティ
   - モバイル
-  - ゲーム開発
   - プロダクト/事例
-  - 組織/キャリア
   - デザイン/UX
   - その他
 
@@ -167,9 +178,11 @@ feeds:
 - **直近記事のみ表示** — 公開日が取れる記事は直近2か月分に絞り込み
 - **重複排除** — 同一 URL の記事は複数ソースをまとめて表示
 
+- **オフライン表示** — Service Worker が直近の内容をキャッシュする
+
 ## GitHub Actions による自動実行
 
-`.github/workflows/kijiyomu.yml` で 2 時間ごとに実行し、GitHub Pages へデプロイします。
+`.github/workflows/kijiyomu.yml` で 2 時間ごとに実行し、GitHub Pages へデプロイします。`--out _site/index.html` で成果物を直接 `_site` に書き出すため、コピー手順はありません。
 
 リポジトリの **Settings → Secrets** に以下を登録してください:
 
@@ -179,8 +192,15 @@ feeds:
 | `AI_API_KEY` | API キー |
 | `AI_MODEL` | モデル名 |
 
-キャッシュ（AI 要約・OG イメージ）は `actions/cache` で runs をまたいで保持されます。
+未設定でも実行は通ります（AI 要約とタグ付けがスキップされます）。
+
+AI 要約・タグ・関連度・OG イメージのキャッシュ（`.kijiyomu_cache.json`）は `actions/cache` で runs をまたいで保持されます。記事一覧から消えて 14 日経ったエントリは自動的に捨てられます。
 
 ## PWA
 
-`manifest.json` と `sw.js` を出力するため、ホーム画面に追加してスタンドアロン起動できます。Service Worker はナビゲーションリクエストをキャッシュするので、オフラインでも直近に開いた内容を表示できます。
+`manifest.json` と `sw.js` を出力するため、ホーム画面に追加してスタンドアロン起動できます。Service Worker のキャッシュ方針は次の通りです。
+
+| 対象 | 方針 |
+|---|---|
+| HTML・`data.json` | ネットワーク優先（オフライン時のみキャッシュ） |
+| ロゴ・アイコン | キャッシュ優先（内容が変わらないため） |
