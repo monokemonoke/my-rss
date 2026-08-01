@@ -31,8 +31,13 @@ header span { color: var(--muted); font-size: 14px; }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--space-3); margin: var(--space-3); }
 
 /* ── card ── */
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; cursor: default; transition: background .12s; }
+/* content-visibility: 画面外のカードは描画をスキップする。300 件超を一度に
+   DOM へ出しているため、スクロール時のコストがこれで大きく下がる。 */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; cursor: default; transition: background .12s, opacity .12s; content-visibility: auto; contain-intrinsic-size: auto 340px; }
 .card:hover { background: var(--surface2); }
+.card-read { opacity: .5; }
+.card-read:hover, .card-read:focus-within { opacity: 1; }
+.card-active { outline: 2px solid var(--link); outline-offset: 2px; }
 
 .card-thumb { width: 100%; aspect-ratio: 16/9; overflow: hidden; background: var(--surface2); }
 .card-thumb a { display: block; width: 100%; height: 100%; }
@@ -77,6 +82,15 @@ header span { color: var(--muted); font-size: 14px; }
 .filter-search:focus-visible { outline: 2px solid var(--link); outline-offset: -1px; }
 .filter-status { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .filter-clear { border: none; background: none; padding: 0; color: var(--link); font-size: 12px; cursor: pointer; text-decoration: underline; }
+.filter-clear-left { align-self: flex-start; }
+.filter-segment { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.filter-segment-item { flex: 1; border: none; background: var(--surface); color: var(--muted); padding: 6px 10px; font-size: 13px; font-family: inherit; cursor: pointer; transition: background .12s, color .12s; }
+.filter-segment-item + .filter-segment-item { border-left: 1px solid var(--border); }
+.filter-segment-item:hover { background: var(--surface2); color: var(--text); }
+.filter-segment-item-active { background: #E8F1FE; color: #2458A6; }
+[data-theme="dark"] .filter-segment-item-active { background: #20304A; color: #9FC4FF; }
+.filter-check { display: flex; align-items: center; gap: var(--space-1); font-size: 13px; cursor: pointer; }
+.filter-check input { cursor: pointer; }
 .filter-section { display: flex; flex-direction: column; gap: 8px; }
 .filter-section-label { font-size: 12px; color: var(--muted); }
 .filter-chips { display: flex; flex-wrap: wrap; gap: 8px; }

@@ -1,4 +1,4 @@
-import React, { createElement as h, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createElement as h, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Search } from 'lucide-react';
 import './style.css';
@@ -33,6 +33,65 @@ async function fetchArticles() {
   return Array.isArray(data.articles) ? data.articles : [];
 }
 
+// ── 既読状態 ──────────────────────────────────────────────────────────────────
+// 記事は 2 か月で一覧から消えるので、それより古い記録は捨ててよい。
+
+const READ_STORAGE_KEY = 'kijiyomu-read';
+const READ_RETENTION_DAYS = 60;
+
+function loadReadState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(READ_STORAGE_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveReadState(state) {
+  try {
+    localStorage.setItem(READ_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // 容量超過やプライベートモードでは既読が保存できないだけなので無視する
+  }
+}
+
+function pruneReadState(state, now) {
+  const cutoff = now - READ_RETENTION_DAYS * 86400000;
+  const kept = {};
+  for (const [url, at] of Object.entries(state)) {
+    if (typeof at === 'number' && at >= cutoff) kept[url] = at;
+  }
+  return kept;
+}
+
+function useReadState() {
+  const [read, setRead] = useState(() => pruneReadState(loadReadState(), Date.now()));
+
+  const markRead = useCallback((url) => {
+    if (!url) return;
+    setRead((prev) => {
+      if (prev[url]) return prev;
+      const next = { ...prev, [url]: Date.now() };
+      saveReadState(next);
+      return next;
+    });
+  }, []);
+
+  const clearRead = useCallback(() => {
+    setRead({});
+    saveReadState({});
+  }, []);
+
+  return { read, markRead, clearRead };
+}
+
+function clamp(value, min, max) {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
 function dateLabel(raw) {
   if (!raw) return '';
   const d = new Date(raw);
@@ -43,7 +102,7 @@ function dateLabel(raw) {
   return `${y}-${m}-${day}`;
 }
 
-function Thumb({ article }) {
+function Thumb({ article, onOpen }) {
   const [failed, setFailed] = useState(!article.og_image);
   useEffect(() => setFailed(!article.og_image), [article.og_image]);
 
@@ -51,7 +110,7 @@ function Thumb({ article }) {
     const cp = THUMB_EMOJIS[hashInt(article.url || article.title || '') % THUMB_EMOJIS.length];
     return h(
       'a',
-      { className: 'card-no-thumb', href: article.url, target: '_blank', rel: 'noopener' },
+      { className: 'card-no-thumb', href: article.url, target: '_blank', rel: 'noopener', onClick: onOpen },
       h('img', { className: 'twemoji-thumb', src: `${TWEMOJI_CDN}${cp}.svg`, alt: '' })
     );
   }
@@ -59,7 +118,7 @@ function Thumb({ article }) {
   return h(
     'div',
     { className: 'card-thumb' },
-    h('a', { href: article.url, target: '_blank', rel: 'noopener' },
+    h('a', { href: article.url, target: '_blank', rel: 'noopener', onClick: onOpen },
       h('img', { src: article.og_image, alt: '', loading: 'lazy', onError: () => setFailed(true) })
     )
   );
@@ -72,12 +131,14 @@ function articleSources(article) {
   return [];
 }
 
-function ArticleCard({ article }) {
+function ArticleCard({ article, isRead, isActive, onOpen }) {
   const bullets = Array.isArray(article.summary) ? article.summary : [];
   const tags = Array.isArray(article.tags) ? article.tags.slice(0, 3) : [];
   const sources = articleSources(article);
   const openArticle = (event) => {
+    // リンクやボタン自身のクリックはそれぞれのハンドラに任せる
     if (!article.url || event.target.closest('a, button')) return;
+    onOpen();
     window.open(article.url, '_blank', 'noopener');
   };
   const openArticleByKey = (event) => {
@@ -87,13 +148,13 @@ function ArticleCard({ article }) {
 
   return h(
     'article',
-    { className: 'card' },
-    h(Thumb, { article }),
+    { className: `card${isRead ? ' card-read' : ''}${isActive ? ' card-active' : ''}` },
+    h(Thumb, { article, onOpen }),
     h(
       'div',
       { className: 'card-body', role: 'link', tabIndex: 0, onClick: openArticle, onKeyDown: openArticleByKey },
       h('div', { className: 'card-title' },
-        h('a', { href: article.url, target: '_blank', rel: 'noopener' }, article.title || '')
+        h('a', { href: article.url, target: '_blank', rel: 'noopener', onClick: onOpen }, article.title || '')
       ),
       h(
         'div',
@@ -166,11 +227,37 @@ function FilterChips({ items, selected, open, onSelect }) {
   );
 }
 
+const SORT_MODES = [
+  { id: 'recommended', label: 'おすすめ' },
+  { id: 'recent', label: '新着' },
+];
+
+function SegmentedControl({ options, value, open, onChange }) {
+  return h(
+    'div',
+    { className: 'filter-segment', role: 'group' },
+    ...options.map((option) => h(
+      'button',
+      {
+        type: 'button',
+        key: option.id,
+        className: `filter-segment-item${value === option.id ? ' filter-segment-item-active' : ''}`,
+        tabIndex: open ? 0 : -1,
+        'aria-pressed': value === option.id ? 'true' : 'false',
+        onClick: () => onChange(option.id),
+      },
+      option.label
+    ))
+  );
+}
+
 function FilterPanel({
   open, onToggleOpen,
   query, onQueryChange,
   tags, selectedTag, onSelectTag,
   sources, selectedSource, onSelectSource,
+  sortMode, onSortModeChange,
+  unreadOnly, onUnreadOnlyChange, readCount, onClearRead,
   matchCount, filtered, onClear,
 }) {
   const searchRef = useRef(null);
@@ -201,6 +288,34 @@ function FilterPanel({
         h('span', null, `${matchCount}件`),
         filtered
           ? h('button', { type: 'button', className: 'filter-clear', tabIndex: open ? 0 : -1, onClick: onClear }, '絞り込みを解除')
+          : null
+      ),
+      h(
+        'div',
+        { className: 'filter-section' },
+        h('div', { className: 'filter-section-label' }, '並び順'),
+        h(SegmentedControl, { options: SORT_MODES, value: sortMode, open, onChange: onSortModeChange })
+      ),
+      h(
+        'div',
+        { className: 'filter-section' },
+        h(
+          'label',
+          { className: 'filter-check' },
+          h('input', {
+            type: 'checkbox',
+            checked: unreadOnly,
+            tabIndex: open ? 0 : -1,
+            onChange: (event) => onUnreadOnlyChange(event.target.checked),
+          }),
+          h('span', null, '未読のみ表示')
+        ),
+        readCount > 0
+          ? h(
+              'button',
+              { type: 'button', className: 'filter-clear filter-clear-left', tabIndex: open ? 0 : -1, onClick: onClearRead },
+              `既読 ${readCount} 件をリセット`
+            )
           : null
       ),
       tags.length > 0
@@ -234,32 +349,54 @@ function FilterPanel({
   );
 }
 
+// gridColumnCount はカードグリッドの実際の列数を返す。j/k の縦移動に使う。
+function gridColumnCount(gridEl) {
+  if (!gridEl) return 1;
+  const columns = window.getComputedStyle(gridEl).gridTemplateColumns;
+  return Math.max(1, columns.split(' ').filter(Boolean).length);
+}
+
+function publishedTime(article) {
+  const t = new Date(article.date || 0).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
+
 function App({ articles }) {
   const gridRef = useRef(null);
   const [query, setQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState(null);
   const [selectedSource, setSelectedSource] = useState(null);
+  const [sortMode, setSortMode] = useState('recommended');
+  const [unreadOnly, setUnreadOnly] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [cursor, setCursor] = useState(-1);
+  const { read, markRead, clearRead } = useReadState();
 
   const tags = useMemo(() => countBy(articles, (a) => (Array.isArray(a.tags) ? a.tags : [])), [articles]);
   const sources = useMemo(() => countBy(articles, articleSources), [articles]);
 
   const needle = query.trim().toLowerCase();
   const visibleArticles = useMemo(() => {
-    if (!needle && !selectedTag && !selectedSource) return articles;
-    return articles.filter((article) => {
+    const matched = articles.filter((article) => {
       if (selectedTag && !(Array.isArray(article.tags) && article.tags.includes(selectedTag))) return false;
       if (selectedSource && !articleSources(article).includes(selectedSource)) return false;
+      if (unreadOnly && read[article.url]) return false;
       if (needle && !searchTextOf(article).includes(needle)) return false;
       return true;
     });
-  }, [articles, needle, selectedTag, selectedSource]);
+    // data.json は関連度順で届くので、新着順のときだけ並べ直す
+    if (sortMode === 'recent') matched.sort((a, b) => publishedTime(b) - publishedTime(a));
+    return matched;
+  }, [articles, needle, selectedTag, selectedSource, unreadOnly, read, sortMode]);
 
-  const filtered = Boolean(needle || selectedTag || selectedSource);
+  const filtered = Boolean(needle || selectedTag || selectedSource || unreadOnly);
+  const readCount = useMemo(() => Object.keys(read).length, [read]);
+
   const clearFilters = () => {
     setQuery('');
     setSelectedTag(null);
     setSelectedSource(null);
+    setUnreadOnly(false);
   };
 
   useEffect(() => {
@@ -276,13 +413,56 @@ function App({ articles }) {
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
+  // 絞り込みが変わるとカーソル位置の記事も変わるので、選択を解除する
+  useEffect(() => setCursor(-1), [needle, selectedTag, selectedSource, unreadOnly, sortMode]);
+
+  useEffect(() => {
+    if (cursor < 0) return;
+    const card = gridRef.current?.children[cursor];
+    card?.scrollIntoView({ block: 'nearest' });
+  }, [cursor]);
+
   useEffect(() => {
     const onKeyDown = (event) => {
-      if (event.key === 'Escape') setFilterOpen(false);
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+      const target = event.target;
+      const typing = target instanceof HTMLElement
+        && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+
+      if (event.key === 'Escape') {
+        setFilterOpen(false);
+        if (typing) target.blur();
+        return;
+      }
+      if (typing) return;
+
+      if (event.key === '/') {
+        event.preventDefault();
+        setFilterOpen(true);
+        return;
+      }
+
+      const steps = { j: gridColumnCount(gridRef.current), k: -gridColumnCount(gridRef.current), l: 1, h: -1 };
+      if (event.key in steps) {
+        if (visibleArticles.length === 0) return;
+        event.preventDefault();
+        setCursor((prev) => (prev < 0 ? 0 : clamp(prev + steps[event.key], 0, visibleArticles.length - 1)));
+        return;
+      }
+
+      if (event.key === 'Enter' && cursor >= 0) {
+        const article = visibleArticles[cursor];
+        if (!article?.url) return;
+        event.preventDefault();
+        markRead(article.url);
+        window.open(article.url, '_blank', 'noopener');
+      }
     };
+
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [visibleArticles, cursor, markRead]);
 
   useEffect(() => {
     const label = document.getElementById('selected-tag-label');
@@ -291,10 +471,11 @@ function App({ articles }) {
     if (selectedTag) parts.push(`タグ: ${selectedTag}`);
     if (selectedSource) parts.push(`ソース: ${selectedSource}`);
     if (needle) parts.push(`"${query.trim()}"`);
+    if (unreadOnly) parts.push('未読のみ');
     if (parts.length > 0) parts.push(`${visibleArticles.length}件`);
     label.hidden = parts.length === 0;
     label.textContent = parts.join(' · ');
-  }, [selectedTag, selectedSource, needle, query, visibleArticles.length]);
+  }, [selectedTag, selectedSource, needle, query, unreadOnly, visibleArticles.length]);
 
   return h(
     React.Fragment,
@@ -302,7 +483,13 @@ function App({ articles }) {
     h(
       'div',
       { className: 'card-grid', ref: gridRef },
-      visibleArticles.map((article, index) => h(ArticleCard, { key: article.url || index, article }))
+      visibleArticles.map((article, index) => h(ArticleCard, {
+        key: article.url || index,
+        article,
+        isRead: Boolean(read[article.url]),
+        isActive: index === cursor,
+        onOpen: () => markRead(article.url),
+      }))
     ),
     filtered && visibleArticles.length === 0
       ? h('p', { className: 'app-status' }, '条件に合う記事がありません。')
@@ -314,10 +501,16 @@ function App({ articles }) {
       onQueryChange: setQuery,
       tags,
       selectedTag,
-      onSelectTag: (tag) => setSelectedTag(tag),
+      onSelectTag: setSelectedTag,
       sources,
       selectedSource,
-      onSelectSource: (source) => setSelectedSource(source),
+      onSelectSource: setSelectedSource,
+      sortMode,
+      onSortModeChange: setSortMode,
+      unreadOnly,
+      onUnreadOnlyChange: setUnreadOnly,
+      readCount,
+      onClearRead: clearRead,
       matchCount: visibleArticles.length,
       filtered,
       onClear: clearFilters,
