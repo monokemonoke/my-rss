@@ -28,6 +28,8 @@ jobs:
 
       - run: go vet ./...
 
+      - run: go test ./...
+
   lint:
     runs-on: ubuntu-latest
     steps:
