@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>KijiYomu - {{.Date}}</title>
-<link rel="icon" type="image/png" href="{{.FaviconDataURI}}">
+<link rel="icon" type="image/png" href="static/favicon.png">
+{{if not .InlineArticles}}<link rel="preload" as="fetch" href="{{.DataURL}}" crossorigin="anonymous">{{end}}
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#F8F8FB" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0F0F12" media="(prefers-color-scheme: dark)">
@@ -19,7 +20,7 @@
 <body>
 <div class="wrap">
 <header>
-  <h1><img class="site-logo" src="{{.LogoDataURI}}" alt="KijiYomu"></h1>
+  <h1><img class="site-logo" src="static/logo.png" alt="KijiYomu" width="180" height="60"></h1>
   <span>{{.Date}}</span>
   <span class="selected-tag-label" id="selected-tag-label" hidden></span>
   <button class="theme-toggle" id="theme-toggle" onclick="(function(){var n=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=n;localStorage.setItem('kijiyomu-theme',n);document.getElementById('theme-toggle').textContent=n==='dark'?'☀':'☾';})()" title="テーマ切り替え">☾</button>
@@ -27,13 +28,7 @@
 <script>(function(){var t=document.documentElement.dataset.theme;document.getElementById('theme-toggle').textContent=t==='dark'?'☀':'☾';})()</script>
 <div id="articles-root"></div>
 </div>
-<script id="articles-data" type="application/json">{{.ArticlesJSON}}</script>
-<script>
-window.KIJIYOMU_PUSH = {
-  endpoint: {{.PushEndpoint}},
-  vapidPublicKey: {{.VAPIDPublicKey}}
-};
-</script>
+{{if .InlineArticles}}<script id="articles-data" type="application/json">{{.ArticlesJSON}}</script>{{end}}
 <script type="module">{{.JS}}</script>
 <script>if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js');</script>
 </body>

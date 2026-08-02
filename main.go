@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	_ "embed"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -44,22 +44,20 @@ var faviconPNG []byte
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
 var CLI struct {
-	APIBase        string `help:"OpenAI-compatible API host URL" env:"AI_API_BASE"`
-	APIKey         string `help:"API key (optional)" env:"AI_API_KEY"`
-	Model          string `help:"Model name" env:"AI_MODEL" default:"gpt-4o-mini"`
-	PushEndpoint   string `help:"Cloudflare Worker push subscription endpoint" env:"PUSH_WORKER_URL"`
-	VAPIDPublicKey string `help:"Web Push VAPID public key" env:"VAPID_PUBLIC_KEY"`
-	Out            string `help:"Output HTML file" default:"kijiyomu.html"`
-	DataIn         string `help:"Read intermediate JSON and render HTML without fetching"`
-	DataOut        string `help:"Write intermediate JSON after fetching"`
-	CacheFile      string `help:"Cache file" default:".kijiyomu_cache.json"`
-	Config         string `help:"Feed config YAML file" default:"kijiyomu.yaml"`
+	APIBase    string `help:"OpenAI-compatible API host URL" env:"AI_API_BASE"`
+	APIKey     string `help:"API key (optional)" env:"AI_API_KEY"`
+	Model      string `help:"Model name" env:"AI_MODEL" default:"gpt-4o-mini"`
+	Out        string `help:"Output HTML file" default:"kijiyomu.html"`
+	InlineData bool   `help:"Embed the article JSON in the HTML instead of writing data.json alongside it"`
+	DataIn     string `help:"Read intermediate JSON and render HTML without fetching"`
+	DataOut    string `help:"Write intermediate JSON after fetching"`
+	CacheFile  string `help:"Cache file" default:".kijiyomu_cache.json"`
+	Config     string `help:"Feed config YAML file" default:"kijiyomu.yaml"`
 }
 
 // ─── Feed config ───────────────────────────────────────────────────────────────
 
 type FeedConfig struct {
-	ID    string `yaml:"id"`
 	Name  string `yaml:"name"`
 	Type  string `yaml:"type"` // hn, rss, atom, rdf, anthropic
 	URL   string `yaml:"url"`
@@ -67,8 +65,10 @@ type FeedConfig struct {
 }
 
 type Config struct {
-	Feeds []FeedConfig `yaml:"feeds"`
-	Tags  []string     `yaml:"tags"`
+	// Profile は読者の興味関心の記述。AI の関連度判定とキーワード概算の両方で使う。
+	Profile string       `yaml:"profile"`
+	Feeds   []FeedConfig `yaml:"feeds"`
+	Tags    []string     `yaml:"tags"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -86,14 +86,41 @@ func loadConfig(path string) (*Config, error) {
 // ─── Data types ───────────────────────────────────────────────────────────────
 
 type Article struct {
-	Title   string   `json:"title"`
-	URL     string   `json:"url"`
-	Source  string   `json:"source"`
-	Score   int      `json:"score,omitempty"`    // points/bookmarks
-	OGImage string   `json:"og_image,omitempty"` // og:image URL
-	Date    string   `json:"date,omitempty"`     // RFC3339 published date
-	Summary []string `json:"summary,omitempty"`  // 3-bullet Japanese summary
-	Tags    []string `json:"tags,omitempty"`     // exactly 3 tags from configured vocabulary
+	Title     string   `json:"title"`
+	URL       string   `json:"url"`
+	Sources   []string `json:"sources"`             // 同一記事を配信していたフィード名
+	Score     int      `json:"score,omitempty"`     // points/bookmarks
+	OGImage   string   `json:"og_image,omitempty"`  // og:image URL
+	Date      string   `json:"date,omitempty"`      // RFC3339 published date
+	Summary   []string `json:"summary,omitempty"`   // 3-bullet Japanese summary
+	Tags      []string `json:"tags,omitempty"`      // exactly 3 tags from configured vocabulary
+	Relevance int      `json:"relevance,omitempty"` // プロフィールへの関連度 0-100
+}
+
+const (
+	// articleSchemaVersion は中間 JSON のスキーマ版。3 で source から sources へ移行した。
+	articleSchemaVersion = 3
+	// legacySourceSeparator は Sources 導入前に複数ソースを 1 つの文字列へ
+	// 結合するのに使っていた区切り。
+	legacySourceSeparator = " / "
+)
+
+// UnmarshalJSON は旧スキーマの "source": "Zenn / はてブ" を Sources として読み込む。
+// 中間 JSON は Actions のキャッシュ経由で世代をまたぐため、移行期間の互換が要る。
+func (a *Article) UnmarshalJSON(data []byte) error {
+	type articleAlias Article // UnmarshalJSON の再帰を避けるための別名
+	aux := struct {
+		LegacySource string `json:"source"`
+		*articleAlias
+	}{articleAlias: (*articleAlias)(a)}
+
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(a.Sources) == 0 && aux.LegacySource != "" {
+		a.Sources = uniqueTrimmedStrings(strings.Split(aux.LegacySource, legacySourceSeparator))
+	}
+	return nil
 }
 
 type RenderData struct {
@@ -158,9 +185,33 @@ type HNStory struct {
 // ─── Cache ────────────────────────────────────────────────────────────────────
 
 type CacheEntry struct {
-	OGImage string   `json:"og_image,omitempty"` // og:image URL ("-" = not found)
-	Summary []string `json:"summary,omitempty"`  // 3-bullet Japanese summary
-	Tags    []string `json:"tags,omitempty"`     // exactly 3 tags from configured vocabulary
+	OGImage   string   `json:"og_image,omitempty"`  // og:image URL ("-" = not found)
+	Summary   []string `json:"summary,omitempty"`   // 3-bullet Japanese summary
+	Tags      []string `json:"tags,omitempty"`      // exactly 3 tags from configured vocabulary
+	Relevance int      `json:"relevance,omitempty"` // プロフィールへの関連度 0-100（0 = 未評価）
+	FailedAt  string   `json:"failed_at,omitempty"` // 直近の AI 呼び出し失敗時刻 (RFC3339)
+	SeenAt    string   `json:"seen_at,omitempty"`   // 最後に記事一覧へ現れた時刻 (RFC3339)
+}
+
+const (
+	// aiRetryInterval は AI 呼び出しに失敗した記事を再試行するまでの間隔。
+	// 2 時間ごとの実行で毎回同じ記事に失敗し続けるのを防ぐ。
+	aiRetryInterval = 24 * time.Hour
+	// cacheEntryTTL は記事一覧から消えたエントリを保持しておく期間。
+	// フィードの一時的な取得失敗で有効なキャッシュを捨てないよう猶予を持たせる。
+	cacheEntryTTL = 14 * 24 * time.Hour
+)
+
+// retryBlocked は直近の失敗から aiRetryInterval 以内かどうかを返す。
+func (e CacheEntry) retryBlocked(now time.Time) bool {
+	if e.FailedAt == "" {
+		return false
+	}
+	failedAt, err := time.Parse(time.RFC3339, e.FailedAt)
+	if err != nil {
+		return false
+	}
+	return now.Sub(failedAt) < aiRetryInterval
 }
 
 type Cache struct {
@@ -208,7 +259,95 @@ func (c *Cache) set(u string, entry CacheEntry) {
 	c.entries[u] = entry
 }
 
+// markFailed は AI 呼び出しの失敗を記録する。以後 aiRetryInterval の間は再試行しない。
+func (c *Cache) markFailed(u string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e := c.entries[u]
+	e.FailedAt = now.Format(time.RFC3339)
+	c.entries[u] = e
+}
+
+// touch は今回の実行で扱った記事に最終参照時刻を記録する。prune の判定材料になる。
+func (c *Cache) touch(articles []Article, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	stamp := now.Format(time.RFC3339)
+	for _, a := range articles {
+		e := c.entries[a.URL]
+		e.SeenAt = stamp
+		c.entries[a.URL] = e
+	}
+}
+
+// prune は最終参照から cacheEntryTTL 以上経過したエントリを削除し、削除件数を返す。
+// SeenAt を持たない旧フォーマットのエントリも対象になる。
+func (c *Cache) prune(now time.Time) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	removed := 0
+	for u, e := range c.entries {
+		seenAt, err := time.Parse(time.RFC3339, e.SeenAt)
+		if err != nil || now.Sub(seenAt) > cacheEntryTTL {
+			delete(c.entries, u)
+			removed++
+		}
+	}
+	return removed
+}
+
+// ─── HTTP ─────────────────────────────────────────────────────────────────────
+
+const userAgent = "Mozilla/5.0 (compatible; kijiyomu/1.0)"
+
+const (
+	feedFetchTimeout = 20 * time.Second
+	pageFetchTimeout = 15 * time.Second
+	aiRequestTimeout = 120 * time.Second
+)
+
+const (
+	feedBodyLimit    = 8 * 1024 * 1024
+	newsPageLimit    = 2 * 1024 * 1024
+	articleTextLimit = 256 * 1024
+	ogImageLimit     = 64 * 1024
+)
+
+var (
+	// feedClient はフィード API 用。ページ取得より少し長めに待つ。
+	feedClient = &http.Client{Timeout: feedFetchTimeout}
+	// pageClient は記事ページ・OG イメージ取得用。
+	pageClient = &http.Client{Timeout: pageFetchTimeout}
+)
+
+// httpGetBody は共通の User-Agent とタイムアウトで GET し、limit バイトまで本文を読む。
+// タイムアウトのないデフォルトクライアントを使うと 1 本の応答なしフィードでジョブ全体が
+// 止まるため、取得系はすべてこれを経由させる。
+func httpGetBody(client *http.Client, rawURL, accept string, limit int64) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("status %s", resp.Status)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, limit))
+}
+
 // ─── Fetchers ─────────────────────────────────────────────────────────────────
+
+const feedAccept = "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.8"
 
 const recentArticleMonths = 2
 const requiredArticleTagCount = 3
@@ -254,26 +393,162 @@ var reArxivQuerySource = regexp.MustCompile(`^ArXiv Query:\s*search_query=all:"(
 
 func displaySourceName(source string) string {
 	source = strings.TrimSpace(source)
-	if source == "" {
-		return ""
+	if match := reArxivQuerySource.FindStringSubmatch(source); len(match) == 2 {
+		return "ArXiv: " + match[1]
 	}
-
-	parts := strings.Split(source, " / ")
-	for i, part := range parts {
-		part = strings.TrimSpace(part)
-		if match := reArxivQuerySource.FindStringSubmatch(part); len(match) == 2 {
-			parts[i] = "ArXiv: " + match[1]
-		} else {
-			parts[i] = part
-		}
-	}
-	return strings.Join(parts, " / ")
+	return source
 }
 
 func normalizeArticleSources(articles []Article) []Article {
 	for i := range articles {
-		articles[i].Source = displaySourceName(articles[i].Source)
+		sources := make([]string, 0, len(articles[i].Sources))
+		for _, source := range articles[i].Sources {
+			if name := displaySourceName(source); name != "" {
+				sources = append(sources, name)
+			}
+		}
+		articles[i].Sources = uniqueTrimmedStrings(sources)
 	}
+	return articles
+}
+
+// ─── Relevance ────────────────────────────────────────────────────────────────
+
+const (
+	// neutralRelevance は関連度を判定できなかった記事に与える既定値。
+	neutralRelevance = 50
+	// relevanceHalfLifeDays は並び替えスコアが半減するまでの日数。
+	// 関連度がやや低くても新しい記事が上に来るようにするための減衰。
+	relevanceHalfLifeDays = 7.0
+	// profileKeywordBonus はプロフィールの語 1 つの一致で加算する点数。
+	profileKeywordBonus = 12
+	// profileKeywordPenalty は「関心低め」の語が一致したときに引く点数。
+	profileKeywordPenalty = 30
+)
+
+// profileKeywords はプロフィール記述から取り出した、関連度概算用の語。
+type profileKeywords struct {
+	positive []string
+	negative []string
+}
+
+var reProfileLine = regexp.MustCompile(`^\s*[-*]\s*([^:：]+)[:：]\s*(.+)$`)
+
+// splitProfileValues は "Rust, Go" や "ゲーム開発(ブラウザゲーム/Phaser3)" のような
+// 記述を個々の語に分解する。
+func splitProfileValues(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		switch r {
+		case ',', '、', '/', '・', '(', ')', '（', '）', '「', '」':
+			return true
+		}
+		return false
+	})
+
+	values := make([]string, 0, len(fields))
+	for _, f := range fields {
+		v := strings.ToLower(strings.TrimSpace(f))
+		// 1 文字の語はどの記事にも当たってしまうため捨てる
+		if len([]rune(v)) < 2 {
+			continue
+		}
+		values = append(values, v)
+	}
+	return values
+}
+
+// parseProfileKeywords は "- 分野: LLM, ゲーム開発" 形式のプロフィールを語に分解する。
+// ラベルに「関心低」を含む行はネガティブ側に振り分ける。
+func parseProfileKeywords(profile string) profileKeywords {
+	var kw profileKeywords
+	for _, line := range strings.Split(profile, "\n") {
+		m := reProfileLine.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		label := m[1]
+		if strings.Contains(label, "関心低") || strings.Contains(label, "興味なし") || strings.Contains(label, "興味無し") {
+			kw.negative = append(kw.negative, splitProfileValues(m[2])...)
+			continue
+		}
+		kw.positive = append(kw.positive, splitProfileValues(m[2])...)
+	}
+	return kw
+}
+
+func (k profileKeywords) empty() bool {
+	return len(k.positive) == 0 && len(k.negative) == 0
+}
+
+// fallbackRelevance は AI を使わずに、プロフィールの語との重なりで関連度を概算する。
+// AI 未設定時と、関連度を持たない古いキャッシュの穴埋めに使う。
+func fallbackRelevance(article Article, kw profileKeywords) int {
+	if kw.empty() {
+		return neutralRelevance
+	}
+
+	haystack := strings.ToLower(strings.Join(append([]string{
+		article.Title,
+		strings.Join(article.Tags, " "),
+	}, article.Summary...), " "))
+
+	score := neutralRelevance
+	for _, word := range kw.positive {
+		if strings.Contains(haystack, word) {
+			score += profileKeywordBonus
+		}
+	}
+	for _, word := range kw.negative {
+		if strings.Contains(haystack, word) {
+			score -= profileKeywordPenalty
+		}
+	}
+
+	return clampRelevance(score)
+}
+
+func clampRelevance(score int) int {
+	switch {
+	case score < 0:
+		return 0
+	case score > 100:
+		return 100
+	default:
+		return score
+	}
+}
+
+// ensureArticleRelevance は関連度が未設定の記事をキーワード概算で埋める。
+func ensureArticleRelevance(articles []Article, kw profileKeywords) []Article {
+	for i := range articles {
+		if articles[i].Relevance == 0 {
+			articles[i].Relevance = fallbackRelevance(articles[i], kw)
+		}
+	}
+	return articles
+}
+
+// rankScore は関連度を経過日数で減衰させた並び替え用スコアを返す。
+func rankScore(a Article, now time.Time) float64 {
+	relevance := float64(a.Relevance)
+	published, ok := parseArticleDate(a.Date)
+	if !ok {
+		// 日付不明は減衰の基準が無いので割り引いて中位に置く
+		return relevance * 0.5
+	}
+
+	ageDays := now.Sub(published).Hours() / 24
+	if ageDays < 0 {
+		ageDays = 0
+	}
+	return relevance * math.Pow(0.5, ageDays/relevanceHalfLifeDays)
+}
+
+// sortArticlesByRank は関連度 × 新しさの順に並べ替える。
+func sortArticlesByRank(articles []Article, now time.Time) []Article {
+	sort.SliceStable(articles, func(i, j int) bool {
+		return rankScore(articles[i], now) > rankScore(articles[j], now)
+	})
 	return articles
 }
 
@@ -364,7 +639,7 @@ func completeArticleTags(tags, fallback, allowedTags []string) []string {
 func fallbackArticleTags(article Article, allowedTags []string) []string {
 	text := strings.ToLower(strings.Join([]string{
 		article.Title,
-		article.Source,
+		strings.Join(article.Sources, " "),
 		strings.Join(article.Summary, " "),
 		article.URL,
 	}, " "))
@@ -462,13 +737,11 @@ func articleDate(raw string) string {
 }
 
 func fetchRSS(rawURL, source string) []Article {
-	resp, err := http.Get(rawURL)
+	body, err := httpGetBody(feedClient, rawURL, feedAccept, feedBodyLimit)
 	if err != nil {
 		log.Printf("[WARN] %s: %v", source, err)
 		return nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
 
 	var feed RSSFeed
 	if err := xml.Unmarshal(body, &feed); err != nil {
@@ -482,23 +755,21 @@ func fetchRSS(rawURL, source string) []Article {
 			continue
 		}
 		articles = append(articles, Article{
-			Title:  strings.TrimSpace(item.Title),
-			URL:    strings.TrimSpace(link),
-			Source: source,
-			Date:   articleDate(firstNonEmpty(item.PubDate, item.Date, item.Published, item.Updated)),
+			Title:   strings.TrimSpace(item.Title),
+			URL:     strings.TrimSpace(link),
+			Sources: []string{source},
+			Date:    articleDate(firstNonEmpty(item.PubDate, item.Date, item.Published, item.Updated)),
 		})
 	}
 	return articles
 }
 
 func fetchAtom(rawURL, source string) []Article {
-	resp, err := http.Get(rawURL)
+	body, err := httpGetBody(feedClient, rawURL, feedAccept, feedBodyLimit)
 	if err != nil {
 		log.Printf("[WARN] %s: %v", source, err)
 		return nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
 
 	var feed AtomFeed
 	if err := xml.Unmarshal(body, &feed); err != nil {
@@ -508,24 +779,23 @@ func fetchAtom(rawURL, source string) []Article {
 	var articles []Article
 	for _, e := range feed.Entries {
 		articles = append(articles, Article{
-			Title:  strings.TrimSpace(e.Title),
-			URL:    strings.TrimSpace(e.Link.Href),
-			Source: source,
-			Date:   articleDate(firstNonEmpty(e.Published, e.Updated)),
+			Title:   strings.TrimSpace(e.Title),
+			URL:     strings.TrimSpace(e.Link.Href),
+			Sources: []string{source},
+			Date:    articleDate(firstNonEmpty(e.Published, e.Updated)),
 		})
 	}
 	return articles
 }
 
 func fetchHN(limit int) []Article {
-	resp, err := http.Get("https://hacker-news.firebaseio.com/v0/topstories.json")
+	body, err := httpGetBody(feedClient, "https://hacker-news.firebaseio.com/v0/topstories.json", "application/json", feedBodyLimit)
 	if err != nil {
 		log.Printf("[WARN] HN topstories: %v", err)
 		return nil
 	}
-	defer func() { _ = resp.Body.Close() }()
 	var ids []int
-	if err := json.NewDecoder(resp.Body).Decode(&ids); err != nil {
+	if err := json.Unmarshal(body, &ids); err != nil {
 		log.Printf("[WARN] HN decode ids: %v", err)
 		return nil
 	}
@@ -544,24 +814,23 @@ func fetchHN(limit int) []Article {
 		go func(idx, id int) {
 			defer wg.Done()
 			rawURL := fmt.Sprintf("https://hacker-news.firebaseio.com/v0/item/%d.json", id)
-			r, err := http.Get(rawURL)
+			itemBody, err := httpGetBody(feedClient, rawURL, "application/json", feedBodyLimit)
 			if err != nil {
 				return
 			}
-			defer func() { _ = r.Body.Close() }()
 			var story HNStory
-			if err := json.NewDecoder(r.Body).Decode(&story); err != nil {
+			if err := json.Unmarshal(itemBody, &story); err != nil {
 				return
 			}
 			if story.URL == "" {
 				story.URL = fmt.Sprintf("https://news.ycombinator.com/item?id=%d", story.ID)
 			}
 			ch <- result{idx, Article{
-				Title:  story.Title,
-				URL:    story.URL,
-				Source: "Hacker News",
-				Score:  story.Score,
-				Date:   formatArticleDate(time.Unix(story.Time, 0)),
+				Title:   story.Title,
+				URL:     story.URL,
+				Sources: []string{"Hacker News"},
+				Score:   story.Score,
+				Date:    formatArticleDate(time.Unix(story.Time, 0)),
 			}}
 		}(i, id)
 	}
@@ -576,13 +845,11 @@ func fetchHN(limit int) []Article {
 }
 
 func fetchRDF(rawURL, source string) []Article {
-	resp, err := http.Get(rawURL)
+	body, err := httpGetBody(feedClient, rawURL, feedAccept, feedBodyLimit)
 	if err != nil {
 		log.Printf("[WARN] %s: %v", source, err)
 		return nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
 
 	var feed RDFFeed
 	if err := xml.Unmarshal(body, &feed); err != nil {
@@ -595,34 +862,21 @@ func fetchRDF(rawURL, source string) []Article {
 			continue
 		}
 		articles = append(articles, Article{
-			Title:  strings.TrimSpace(item.Title),
-			URL:    strings.TrimSpace(item.Link),
-			Source: source,
-			Date:   articleDate(item.Date),
+			Title:   strings.TrimSpace(item.Title),
+			URL:     strings.TrimSpace(item.Link),
+			Sources: []string{source},
+			Date:    articleDate(item.Date),
 		})
 	}
 	return articles
 }
 
 func fetchAnthropicNews(rawURL, source string) []Article {
-	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequest("GET", rawURL, nil)
+	body, err := httpGetBody(pageClient, rawURL, "text/html", newsPageLimit)
 	if err != nil {
 		log.Printf("[WARN] %s: %v", source, err)
 		return nil
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; kijiyomu/1.0)")
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[WARN] %s: %v", source, err)
-		return nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("[WARN] %s: status %s", source, resp.Status)
-		return nil
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	page := string(body)
 
 	base, err := url.Parse(rawURL)
@@ -677,10 +931,10 @@ func fetchAnthropicNews(rawURL, source string) []Article {
 			}
 			seen[fullURL] = true
 			articles = append(articles, Article{
-				Title:  title,
-				URL:    fullURL,
-				Source: source,
-				Date:   date,
+				Title:   title,
+				URL:     fullURL,
+				Sources: []string{source},
+				Date:    date,
 			})
 		}
 	}
@@ -710,62 +964,32 @@ func normalizeURL(rawURL string) string {
 	return strings.TrimRight(result, "/")
 }
 
-// deduplicateArticles は同じ URL の記事をまとめ、ソース名を結合する
+// deduplicateArticles は同じ URL の記事を 1 つにまとめ、配信元を集約する
 func deduplicateArticles(articles []Article) []Article {
-	type group struct {
-		article Article
-		sources []string
-	}
-	seen := make(map[string]int) // normalizedURL → index in groups
-	groups := make([]group, 0, len(articles))
+	seen := make(map[string]int, len(articles)) // normalizedURL → merged のインデックス
+	merged := make([]Article, 0, len(articles))
 
 	for _, a := range articles {
 		key := normalizeURL(a.URL)
-		if idx, ok := seen[key]; ok {
-			// 既存グループにソースを追加、スコアは高い方を採用
-			g := &groups[idx]
-			// 重複しないソースのみ追加
-			alreadyHas := false
-			for _, s := range g.sources {
-				if s == a.Source {
-					alreadyHas = true
-					break
-				}
-			}
-			if !alreadyHas {
-				g.sources = append(g.sources, a.Source)
-			}
-			if a.Score > g.article.Score {
-				g.article.Score = a.Score
-			}
-			if g.article.Date == "" {
-				g.article.Date = a.Date
-			}
-		} else {
-			seen[key] = len(groups)
-			groups = append(groups, group{article: a, sources: []string{a.Source}})
+		idx, ok := seen[key]
+		if !ok {
+			a.Sources = uniqueTrimmedStrings(a.Sources)
+			seen[key] = len(merged)
+			merged = append(merged, a)
+			continue
+		}
+
+		// 配信元は足し合わせ、スコアは高い方、日付は先に取れた方を採用する
+		target := &merged[idx]
+		target.Sources = uniqueTrimmedStrings(append(target.Sources, a.Sources...))
+		if a.Score > target.Score {
+			target.Score = a.Score
+		}
+		if target.Date == "" {
+			target.Date = a.Date
 		}
 	}
-
-	result := make([]Article, len(groups))
-	for i, g := range groups {
-		a := g.article
-		a.Source = strings.Join(g.sources, " / ")
-		result[i] = a
-	}
-	return result
-}
-
-func sortArticlesByDate(articles []Article) []Article {
-	sort.SliceStable(articles, func(i, j int) bool {
-		ti, oki := parseArticleDate(articles[i].Date)
-		tj, okj := parseArticleDate(articles[j].Date)
-		if oki && okj {
-			return ti.After(tj)
-		}
-		return oki && !okj // 日付なし記事は末尾へ
-	})
-	return articles
+	return merged
 }
 
 func filterRecentArticles(articles []Article, months int, now time.Time) []Article {
@@ -788,20 +1012,10 @@ func filterRecentArticles(articles []Article, months int, now time.Time) []Artic
 
 // fetchOGImage はページの og:image URL を返す。見つからない場合は空文字。
 func fetchOGImage(rawURL string) string {
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("GET", rawURL, nil)
+	body, err := httpGetBody(pageClient, rawURL, "text/html", ogImageLimit)
 	if err != nil {
 		return ""
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; kijiyomu/1.0)")
-	req.Header.Set("Accept", "text/html")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	lower := strings.ToLower(string(body))
 
 	// <meta property="og:image" content="..."> を探す（順不同属性に対応）
@@ -900,7 +1114,10 @@ func newAIClient(apiBase, apiKey string) *openai.Client {
 }
 
 func callAI(client *openai.Client, model, system, userMsg string) (string, error) {
-	resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
+	ctx, cancel := context.WithTimeout(context.Background(), aiRequestTimeout)
+	defer cancel()
+
+	resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 		Model: model,
 		Messages: []openai.ChatCompletionMessage{
 			{Role: openai.ChatMessageRoleSystem, Content: system},
@@ -967,30 +1184,18 @@ func articleTextURLs(rawURL string) []string {
 	return []string{rawURL}
 }
 
-func fetchPlainText(client *http.Client, rawURL string) string {
-	req, err := http.NewRequest("GET", rawURL, nil)
+func fetchPlainText(rawURL string) string {
+	body, err := httpGetBody(pageClient, rawURL, "text/html", articleTextLimit)
 	if err != nil {
 		return ""
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; kijiyomu/1.0)")
-	req.Header.Set("Accept", "text/html")
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 {
-		return ""
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	return stripHTML(string(body))
 }
 
 // fetchArticleText は記事ページのプレーンテキストを取得する
 func fetchArticleText(rawURL string) string {
-	client := &http.Client{Timeout: 15 * time.Second}
 	for _, candidateURL := range articleTextURLs(rawURL) {
-		text := fetchPlainText(client, candidateURL)
+		text := fetchPlainText(candidateURL)
 		if text != "" {
 			return text
 		}
@@ -998,22 +1203,81 @@ func fetchArticleText(rawURL string) string {
 	return ""
 }
 
-const summarizeSystemPrompt = `あなたは記事の要約専門アシスタントです。
-与えられた記事の内容を日本語で3点の箇条書きにまとめてください。
-必ずJSON配列のみ返すこと。説明文・前置き・コードブロック記法は不要。
-例: ["要点1の説明", "要点2の説明", "要点3の説明"]`
+const enrichSystemPrompt = `あなたは技術記事のキュレーションアシスタントです。
+与えられた記事について次の3つを判定し、JSONオブジェクトのみを返してください。
 
-// summarizeArticles は全記事の要約を並列生成する（キャッシュ済みはスキップ）
-func summarizeArticles(articles []Article, client *openai.Client, model string, cache *Cache) []Article {
-	uncached := make([]int, 0, len(articles))
-	for i := range articles {
-		if e, ok := cache.get(articles[i].URL); ok && len(e.Summary) > 0 {
-			articles[i].Summary = e.Summary
-		} else {
-			uncached = append(uncached, i)
-		}
+- summary: 記事の要点を日本語で3点にまとめた文字列の配列
+- tags: 提示された候補タグから重複なしで選んだちょうど3つの文字列の配列
+- relevance: 読者プロフィールへの関連度を表す0〜100の整数
+
+relevance は読者プロフィールとの一致度です。プロフィールの言語・分野・製品に
+強く重なる記事は高く、「関心低め」に該当する記事は低くしてください。
+判断材料が乏しい場合は50前後にしてください。
+
+説明文・前置き・コードブロック記法は不要。
+例: {"summary":["要点1","要点2","要点3"],"tags":["AI/LLM","開発ツール","研究/論文"],"relevance":72}`
+
+// articleEnrichment は enrichSystemPrompt に対する AI の応答。
+type articleEnrichment struct {
+	Summary   []string `json:"summary"`
+	Tags      []string `json:"tags"`
+	Relevance int      `json:"relevance"`
+}
+
+const maxArticleTextLen = 4000
+
+func buildEnrichPrompt(article Article, allowedTags []string, profile, text string) string {
+	var b strings.Builder
+	if strings.TrimSpace(profile) != "" {
+		fmt.Fprintf(&b, "読者プロフィール:\n%s\n\n", strings.TrimSpace(profile))
 	}
-	log.Printf("  summarizing %d articles (cached: %d)", len(uncached), len(articles)-len(uncached))
+	fmt.Fprintf(&b, "候補タグ:\n- %s\n\n", strings.Join(allowedTags, "\n- "))
+	fmt.Fprintf(&b, "タイトル: %s\nソース: %s\nURL: %s\n", article.Title, strings.Join(article.Sources, ", "), article.URL)
+	if text != "" {
+		fmt.Fprintf(&b, "\n本文:\n%s", text)
+	}
+	return b.String()
+}
+
+// trimAIJSONFence はコードブロック記法で包まれた応答から中身を取り出す。
+func trimAIJSONFence(content string) string {
+	content = strings.TrimSpace(content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	return strings.TrimSpace(content)
+}
+
+func parseArticleEnrichment(content string) (articleEnrichment, error) {
+	var result articleEnrichment
+	if err := json.Unmarshal([]byte(trimAIJSONFence(content)), &result); err != nil {
+		return articleEnrichment{}, err
+	}
+	return result, nil
+}
+
+// enrichArticles は要約・タグ・関連度を 1 回の AI 呼び出しでまとめて求める。
+// 記事ごとに要約とタグで 2 回呼んでいたものを 1 回に減らしている。
+func enrichArticles(articles []Article, client *openai.Client, model string, cache *Cache, allowedTags []string, profile string, kw profileKeywords) []Article {
+	now := time.Now()
+	uncached := make([]int, 0, len(articles))
+	cached, blocked := 0, 0
+
+	for i := range articles {
+		entry, ok := cache.get(articles[i].URL)
+		if ok && applyCachedEnrichment(&articles[i], entry, allowedTags, kw) {
+			cached++
+			continue
+		}
+		if ok && entry.retryBlocked(now) {
+			// 直近で失敗しているので、間隔を空けるまで API を呼ばずキーワード推定で埋める
+			applyFallbackEnrichment(&articles[i], allowedTags, kw)
+			blocked++
+			continue
+		}
+		uncached = append(uncached, i)
+	}
+	log.Printf("  enriching %d articles (cached: %d, recently failed: %d)", len(uncached), cached, blocked)
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 3) // AI API への同時リクエスト数を制限
@@ -1027,119 +1291,75 @@ func summarizeArticles(articles []Article, client *openai.Client, model string, 
 
 			a := &articles[i]
 			text := fetchArticleText(a.URL)
-			const maxTextLen = 4000
-			if len([]rune(text)) > maxTextLen {
-				runes := []rune(text)
-				text = string(runes[:maxTextLen])
+			if runes := []rune(text); len(runes) > maxArticleTextLen {
+				text = string(runes[:maxArticleTextLen])
 			}
 
-			prompt := fmt.Sprintf("タイトル: %s\n\n本文:\n%s", a.Title, text)
-			content, err := callAI(client, model, summarizeSystemPrompt, prompt)
+			prompt := buildEnrichPrompt(*a, allowedTags, profile, text)
+			content, err := callAI(client, model, enrichSystemPrompt, prompt)
 			if err != nil {
-				log.Printf("[WARN] summarize %s: %v", a.URL, err)
+				log.Printf("[WARN] enrich %s: %v", a.URL, err)
+				applyFallbackEnrichment(a, allowedTags, kw)
+				cache.markFailed(a.URL, time.Now())
 				return
 			}
 
-			bullets, err := parseAIStringArray(content)
+			result, err := parseArticleEnrichment(content)
 			if err != nil {
-				log.Printf("[WARN] summarize JSON parse %s: %v", a.URL, err)
+				log.Printf("[WARN] enrich JSON parse %s: %v", a.URL, err)
+				applyFallbackEnrichment(a, allowedTags, kw)
+				cache.markFailed(a.URL, time.Now())
 				return
 			}
 
-			a.Summary = bullets
+			a.Summary = result.Summary
+			a.Tags = completeArticleTags(result.Tags, fallbackArticleTags(*a, allowedTags), allowedTags)
+			a.Relevance = clampRelevance(result.Relevance)
+			if a.Relevance == 0 {
+				a.Relevance = fallbackRelevance(*a, kw)
+			}
+
 			e, _ := cache.get(a.URL)
-			e.Summary = bullets
-			cache.set(a.URL, e)
-		}(idx)
-	}
-	wg.Wait()
-	return articles
-}
-
-const tagSystemPrompt = `あなたは技術記事のタグ分類アシスタントです。
-ユーザーが提示する候補タグの中から、記事に最も合うタグを重複なしで必ず3つ選んでください。
-必ずJSON配列のみ返すこと。説明文・前置き・コードブロック記法は不要。
-例: ["AI/LLM", "開発ツール", "プロダクト/事例"]`
-
-func buildTagPrompt(article Article, allowedTags []string) string {
-	return fmt.Sprintf(
-		"候補タグ:\n- %s\n\nタイトル: %s\nソース: %s\nURL: %s\n要約:\n- %s",
-		strings.Join(allowedTags, "\n- "),
-		article.Title,
-		article.Source,
-		article.URL,
-		strings.Join(article.Summary, "\n- "),
-	)
-}
-
-func parseAIStringArray(content string) ([]string, error) {
-	content = strings.TrimSpace(content)
-	content = strings.TrimPrefix(content, "```json")
-	content = strings.TrimPrefix(content, "```")
-	content = strings.TrimSuffix(content, "```")
-	content = strings.TrimSpace(content)
-
-	var values []string
-	if err := json.Unmarshal([]byte(content), &values); err != nil {
-		return nil, err
-	}
-	return values, nil
-}
-
-// tagArticles は定義済みタグから各記事に3タグを付与する（キャッシュ済みはスキップ）
-func tagArticles(articles []Article, client *openai.Client, model string, cache *Cache, allowedTags []string) []Article {
-	uncached := make([]int, 0, len(articles))
-	for i := range articles {
-		if e, ok := cache.get(articles[i].URL); ok && len(e.Tags) > 0 {
-			tags := normalizeArticleTags(e.Tags, allowedTags)
-			if len(tags) == requiredArticleTagCount {
-				articles[i].Tags = tags
-				continue
-			}
-		}
-
-		tags := normalizeArticleTags(articles[i].Tags, allowedTags)
-		if len(tags) == requiredArticleTagCount {
-			articles[i].Tags = tags
-			continue
-		}
-		uncached = append(uncached, i)
-	}
-	log.Printf("  tagging %d articles (cached: %d)", len(uncached), len(articles)-len(uncached))
-
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 3) // AI API への同時リクエスト数を制限
-
-	for _, idx := range uncached {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			a := &articles[i]
-			content, err := callAI(client, model, tagSystemPrompt, buildTagPrompt(*a, allowedTags))
-			if err != nil {
-				log.Printf("[WARN] tag %s: %v", a.URL, err)
-				a.Tags = fallbackArticleTags(*a, allowedTags)
-				return
-			}
-
-			values, err := parseAIStringArray(content)
-			if err != nil {
-				log.Printf("[WARN] tag JSON parse %s: %v", a.URL, err)
-				a.Tags = fallbackArticleTags(*a, allowedTags)
-				return
-			}
-
-			a.Tags = completeArticleTags(values, fallbackArticleTags(*a, allowedTags), allowedTags)
-			e, _ := cache.get(a.URL)
+			e.Summary = a.Summary
 			e.Tags = a.Tags
+			e.Relevance = a.Relevance
+			e.FailedAt = ""
 			cache.set(a.URL, e)
 		}(idx)
 	}
 	wg.Wait()
 	return articles
+}
+
+// applyCachedEnrichment はキャッシュ済みの要約・タグを記事へ写す。
+// 揃っていなければ false を返して AI 呼び出しに回す。
+// 関連度だけが欠けている場合は、関連度導入前のキャッシュとみなして概算で埋める。
+func applyCachedEnrichment(article *Article, entry CacheEntry, allowedTags []string, kw profileKeywords) bool {
+	if len(entry.Summary) == 0 {
+		return false
+	}
+	tags := normalizeArticleTags(entry.Tags, allowedTags)
+	if len(tags) != requiredArticleTagCount {
+		return false
+	}
+
+	article.Summary = entry.Summary
+	article.Tags = tags
+	article.Relevance = entry.Relevance
+	if article.Relevance == 0 {
+		article.Relevance = fallbackRelevance(*article, kw)
+	}
+	return true
+}
+
+// applyFallbackEnrichment は AI を使えないときにタグと関連度だけでも埋める。
+func applyFallbackEnrichment(article *Article, allowedTags []string, kw profileKeywords) {
+	if len(normalizeArticleTags(article.Tags, allowedTags)) != requiredArticleTagCount {
+		article.Tags = fallbackArticleTags(*article, allowedTags)
+	}
+	if article.Relevance == 0 {
+		article.Relevance = fallbackRelevance(*article, kw)
+	}
 }
 
 // ─── HTML output ──────────────────────────────────────────────────────────────
@@ -1147,7 +1367,9 @@ func tagArticles(articles []Article, client *openai.Client, model string, cache 
 func collectSources(articles []Article) []string {
 	sourceSet := map[string]bool{}
 	for _, a := range articles {
-		sourceSet[a.Source] = true
+		for _, source := range a.Sources {
+			sourceSet[source] = true
+		}
 	}
 	var sources []string
 	for s := range sourceSet {
@@ -1184,48 +1406,59 @@ func saveRenderData(path string, renderData RenderData) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-func renderHTML(path string, renderData RenderData) error {
+// writeArticleData は HTML と同じディレクトリへ配信用の data.json を書き出す。
+// 中間 JSON (--data-out) と違い、転送量を抑えるため整形しない。
+func writeArticleData(outHTMLPath string, renderData RenderData) error {
+	data, err := json.Marshal(renderData)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(filepath.Dir(outHTMLPath), articleDataFileName), data, 0644)
+}
+
+// articleDataFileName は HTML の隣に置く配信用データのファイル名。
+const articleDataFileName = "data.json"
+
+// renderHTML は HTML を書き出す。inlineArticles が false のときは記事 JSON を
+// 埋め込まず、別ファイルの data.json をブラウザ側で取得させる。
+func renderHTML(path string, renderData RenderData, inlineArticles bool) error {
 	funcMap := template.FuncMap{
 		"dateLabel": dateLabel,
 	}
 	tmpl := template.Must(template.New("feed").Funcs(funcMap).Parse(htmlTmpl))
-	articlesJSON, err := json.Marshal(renderData.Articles)
-	if err != nil {
-		return err
-	}
-	pushEndpointJSON, err := json.Marshal(CLI.PushEndpoint)
-	if err != nil {
-		return err
-	}
-	vapidPublicKeyJSON, err := json.Marshal(CLI.VAPIDPublicKey)
-	if err != nil {
-		return err
+
+	var articlesJSON template.JS
+	if inlineArticles {
+		encoded, err := json.Marshal(renderData.Articles)
+		if err != nil {
+			return err
+		}
+		articlesJSON = template.JS(encoded)
 	}
 
 	data := struct {
 		Date           string
 		Articles       []Article
 		Sources        []string
+		InlineArticles bool
 		ArticlesJSON   template.JS
-		PushEndpoint   template.JS
-		VAPIDPublicKey template.JS
+		DataURL        string
 		CSS            template.CSS
 		JS             template.JS
-		LogoDataURI    template.URL
-		FaviconDataURI template.URL
 	}{
 		Date:           renderData.Date,
 		Articles:       renderData.Articles,
 		Sources:        renderData.Sources,
-		ArticlesJSON:   template.JS(articlesJSON),
-		PushEndpoint:   template.JS(pushEndpointJSON),
-		VAPIDPublicKey: template.JS(vapidPublicKeyJSON),
+		InlineArticles: inlineArticles,
+		ArticlesJSON:   articlesJSON,
+		DataURL:        articleDataFileName,
 		CSS:            template.CSS(cssContent),
 		JS:             template.JS(jsContent),
-		LogoDataURI:    template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(logoPNG)),
-		FaviconDataURI: template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(faviconPNG)),
 	}
 
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -1236,7 +1469,7 @@ func renderHTML(path string, renderData RenderData) error {
 
 // ─── PWA files ────────────────────────────────────────────────────────────────
 
-const swJS = `const CACHE = 'kijiyomu-v1';
+const swJS = `const CACHE = 'kijiyomu-v2';
 
 self.addEventListener('install', () => self.skipWaiting());
 
@@ -1248,38 +1481,29 @@ self.addEventListener('activate', e => {
   );
 });
 
-self.addEventListener('fetch', e => {
-  if (e.request.mode !== 'navigate') return;
-  e.respondWith(
-    fetch(e.request)
-      .then(res => {
-        const copy = res.clone();
-        caches.open(CACHE).then(c => c.put(e.request, copy));
-        return res;
-      })
-      .catch(() => caches.match(e.request))
-  );
-});
-
-self.addEventListener('push', e => {
-  let payload = {};
-  if (e.data) {
-    try { payload = e.data.json(); } catch { payload = { title: e.data.text() }; }
+function store(req, res) {
+  if (res.ok) {
+    const copy = res.clone();
+    caches.open(CACHE).then(c => c.put(req, copy));
   }
-  const title = payload.title || 'KijiYomu';
-  const options = {
-    body: payload.body || '新しい記事があります',
-    icon: './static/icon-192.png',
-    badge: './static/icon-192.png',
-    data: { url: payload.url || './' },
-  };
-  e.waitUntil(self.registration.showNotification(title, options));
-});
+  return res;
+}
 
-self.addEventListener('notificationclick', e => {
-  e.notification.close();
-  const url = e.notification.data && e.notification.data.url ? e.notification.data.url : './';
-  e.waitUntil(clients.openWindow(url));
+self.addEventListener('fetch', e => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+
+  // HTML と記事データは 2 時間ごとに更新されるので毎回取りに行き、
+  // オフライン時だけキャッシュを使う
+  if (req.mode === 'navigate' || new URL(req.url).pathname.endsWith('/data.json')) {
+    e.respondWith(fetch(req).then(res => store(req, res)).catch(() => caches.match(req)));
+    return;
+  }
+
+  // ロゴ・アイコンは内容が変わらないのでキャッシュ優先
+  if (req.destination === 'image' && new URL(req.url).origin === self.location.origin) {
+    e.respondWith(caches.match(req).then(hit => hit || fetch(req).then(res => store(req, res))));
+  }
 });
 `
 
@@ -1291,6 +1515,13 @@ func writePWAFiles(outHTMLPath string) error {
 		return fmt.Errorf("create static dir: %w", err)
 	}
 
+	// HTML から参照するロゴ・ファビコンも出力先へ置く（data URI をやめたため）
+	if err := os.WriteFile(filepath.Join(iconDir, "logo.png"), logoPNG, 0644); err != nil {
+		return fmt.Errorf("write static/logo.png: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(iconDir, "favicon.png"), faviconPNG, 0644); err != nil {
+		return fmt.Errorf("write static/favicon.png: %w", err)
+	}
 	if err := os.WriteFile(filepath.Join(iconDir, "icon-192.png"), faviconPNG, 0644); err != nil {
 		return fmt.Errorf("write static/icon-192.png: %w", err)
 	}
@@ -1367,6 +1598,11 @@ func main() {
 		feedCfg = cfg
 	}
 	allowedTags := configuredArticleTags(feedCfg)
+	profile := ""
+	if feedCfg != nil {
+		profile = feedCfg.Profile
+	}
+	profileWords := parseProfileKeywords(profile)
 
 	var aiClient *openai.Client
 	if CLI.APIBase != "" {
@@ -1380,11 +1616,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("load intermediate data: %v", err)
 		}
-		renderData.SchemaVersion = 2
+		now := time.Now()
+		renderData.SchemaVersion = articleSchemaVersion
 		renderData.Articles = normalizeArticleSources(renderData.Articles)
-		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, time.Now())
-		renderData.Articles = sortArticlesByDate(renderData.Articles)
+		renderData.Articles = filterRecentArticles(renderData.Articles, recentArticleMonths, now)
 		renderData.Articles = ensureArticleTags(renderData.Articles, allowedTags)
+		renderData.Articles = ensureArticleRelevance(renderData.Articles, profileWords)
+		renderData.Articles = sortArticlesByRank(renderData.Articles, now)
 		renderData.Sources = collectSources(renderData.Articles)
 		if CLI.DataOut != "" {
 			if err := saveRenderData(CLI.DataOut, *renderData); err != nil {
@@ -1392,8 +1630,13 @@ func main() {
 			}
 			log.Printf("Written data: %s (%d articles)", CLI.DataOut, len(renderData.Articles))
 		}
-		if err := renderHTML(CLI.Out, *renderData); err != nil {
+		if err := renderHTML(CLI.Out, *renderData, CLI.InlineData); err != nil {
 			log.Fatalf("render HTML: %v", err)
+		}
+		if !CLI.InlineData {
+			if err := writeArticleData(CLI.Out, *renderData); err != nil {
+				log.Fatalf("write article data: %v", err)
+			}
 		}
 		if err := writePWAFiles(CLI.Out); err != nil {
 			log.Printf("[WARN] PWA files: %v", err)
@@ -1464,26 +1707,29 @@ func main() {
 	allArticles = filterRecentArticles(allArticles, recentArticleMonths, time.Now())
 	log.Printf("After recent filter: %d articles (removed %d older than %d months)", len(allArticles), before-len(allArticles), recentArticleMonths)
 
-	allArticles = sortArticlesByDate(allArticles)
-
 	// OG image fetch (all articles, cached)
 	log.Println("Fetching OG images...")
 	allArticles = fetchOGImages(allArticles, cache)
 
-	// AI summarization
+	// AI enrichment: 要約・タグ・関連度をまとめて 1 回で求める
 	if aiClient != nil {
-		log.Printf("Summarizing with AI (model: %s)...", CLI.Model)
-		allArticles = summarizeArticles(allArticles, aiClient, CLI.Model, cache)
-		log.Printf("Tagging with AI (model: %s)...", CLI.Model)
-		allArticles = tagArticles(allArticles, aiClient, CLI.Model, cache, allowedTags)
+		log.Printf("Enriching with AI (model: %s)...", CLI.Model)
+		allArticles = enrichArticles(allArticles, aiClient, CLI.Model, cache, allowedTags, profile, profileWords)
 	} else {
 		allArticles = ensureArticleTags(allArticles, allowedTags)
 	}
+	allArticles = ensureArticleRelevance(allArticles, profileWords)
+	allArticles = sortArticlesByRank(allArticles, time.Now())
 
+	cacheNow := time.Now()
+	cache.touch(allArticles, cacheNow)
+	if removed := cache.prune(cacheNow); removed > 0 {
+		log.Printf("Cache: pruned %d stale entries", removed)
+	}
 	cache.save()
 
 	renderData := RenderData{
-		SchemaVersion: 2,
+		SchemaVersion: articleSchemaVersion,
 		Date:          time.Now().In(time.FixedZone("JST", 9*60*60)).Format("2006-01-02 15:04"),
 		Articles:      allArticles,
 		Sources:       collectSources(allArticles),
@@ -1494,8 +1740,13 @@ func main() {
 		}
 		log.Printf("Written data: %s (%d articles)", CLI.DataOut, len(renderData.Articles))
 	}
-	if err := renderHTML(CLI.Out, renderData); err != nil {
+	if err := renderHTML(CLI.Out, renderData, CLI.InlineData); err != nil {
 		log.Fatalf("render HTML: %v", err)
+	}
+	if !CLI.InlineData {
+		if err := writeArticleData(CLI.Out, renderData); err != nil {
+			log.Fatalf("write article data: %v", err)
+		}
 	}
 	if err := writePWAFiles(CLI.Out); err != nil {
 		log.Printf("[WARN] PWA files: %v", err)

@@ -1,6 +1,6 @@
 # KijiYomu
 
-複数の技術系フィードから記事を収集し、AI が各記事の要点を日本語3箇条で要約して HTML カードビューで出力する CLI ツール。
+複数の技術系フィードから記事を集め、AI が要約・タグ付け・興味との関連度判定をまとめて行い、カード形式のビューを生成する CLI ツール。出力は静的ファイルだけなので、そのまま GitHub Pages に置けます。
 
 ## セットアップ
 
@@ -10,10 +10,9 @@ pnpm run build
 go build -o kijiyomu .
 ```
 
-dotenvx を使う場合:
+`.env` を作って dotenvx 経由で実行すると、API キーを環境変数で渡せます。
 
 ```bash
-cp .env.example .env  # または手動で作成
 dotenvx run -- go run main.go
 ```
 
@@ -46,12 +45,24 @@ go run main.go --data-in kijiyomu-data.json --out kijiyomu.html
 ### その他の例
 
 ```bash
-# AI 要約なし（API 設定不要）
+# AI 要約なし（API 設定不要）。関連度はキーワード一致で概算する
 ./kijiyomu
 
-# 出力ファイル名を指定
-dotenvx run -- ./kijiyomu --out feed.html
+# 出力先を指定。存在しないディレクトリは自動で作られる
+dotenvx run -- ./kijiyomu --out _site/index.html
 ```
+
+### 出力されるファイル
+
+`--out` で指定した HTML の隣に、配信に必要なものが一式そろいます。
+
+| ファイル | 内容 |
+|---|---|
+| `index.html`（`--out` の名前） | ページ本体。CSS と JS はインライン |
+| `data.json` | 記事データ。ブラウザが `fetch` で読む |
+| `manifest.json` / `sw.js` | PWA 用 |
+| `static/logo.png` ほか | ロゴ・アイコン |
+| `apple-touch-icon.png` | iOS ホーム画面用 |
 
 ## オプション一覧
 
@@ -61,6 +72,7 @@ dotenvx run -- ./kijiyomu --out feed.html
 | `--api-key` | `AI_API_KEY` | (なし) | API キー |
 | `--model` | `AI_MODEL` | `gpt-4o-mini` | モデル名 |
 | `--out` | | `kijiyomu.html` | 出力 HTML ファイル名 |
+| `--inline-data` | | (off) | 記事 JSON を HTML に埋め込む（`data.json` を出さない） |
 | `--data-in` | | (なし) | 中間 JSON を読み込んで HTML だけ生成 |
 | `--data-out` | | (なし) | 取得・要約後の中間 JSON を保存 |
 | `--cache-file` | | `.kijiyomu_cache.json` | キャッシュファイルのパス |
@@ -76,18 +88,37 @@ dotenvx run -- go run main.go --data-out kijiyomu-data.json
 
 # 2. デザイン変更後に HTML を再生成
 pnpm run build
-go run main.go --data-in kijiyomu-data.json --out kijiyomu.html
+go run main.go --data-in kijiyomu-data.json --inline-data --out kijiyomu.html
 ```
 
 `--data-in` 指定時はフィード取得・OG 画像取得・AI 要約をすべてスキップします。
 
-## フィードソースの設定（kijiyomu.yaml）
+記事データは通常 `data.json` として HTML の隣に出力され、ブラウザが `fetch` で読み込みます。`file://` で直接開くと `fetch` がブロックされるため、ローカルで確認するときは `--inline-data` を付けて HTML に埋め込んでください。
+
+## 設定（kijiyomu.yaml）
+
+### profile — 関連度の判定基準
+
+`profile` に興味関心を書いておくと、AI が記事ごとに 0〜100 の関連度を判定します。カードは「関連度 × 新しさ」の順に並びます。関連度は 7 日で半減するよう減衰させているので、多少関連度が低くても新しい記事は上に来ます。
+
+```yaml
+profile: |
+  - 言語/技術: Rust, Go, TypeScript, Python
+  - 分野: システムプログラミング, LLM/AIエージェント, ゲーム開発
+  - 関心低め: スポーツ
+```
+
+`- ラベル: 値1, 値2` の形式で書いておくと、AI を設定していない場合でも語の一致でおおまかな関連度を計算します。ラベルに「関心低め」を含む行はマイナス側に働きます。
+
+### tags / feeds
 
 `kijiyomu.yaml` でタグの種類とフィードソースを自由に追加・削除できます。記事には `tags` の候補から重複なしで3つのタグが付きます。
 
 ```yaml
 tags:
-  - AI/LLM
+  - LLM/言語モデル
+  - 生成AI
+  - ML/機械学習
   - AIエージェント
   - 研究/論文
   - 開発ツール
@@ -98,9 +129,7 @@ tags:
   - データベース
   - セキュリティ
   - モバイル
-  - ゲーム開発
   - プロダクト/事例
-  - 組織/キャリア
   - デザイン/UX
   - その他
 
@@ -140,14 +169,20 @@ feeds:
 
 - **カードグリッド表示** — OG イメージ付きのカード形式
 - **AI 要約** — 各記事の要点を日本語3箇条で表示
-- **React 仮想スクロール** — 静的 HTML に記事 JSON を埋め込み、表示範囲のカードだけ描画
-- **キーボード操作** — `j`/`k`/`h`/`l` でカード移動、Enter で記事を開く
+- **関連度順の並び** — `profile` との関連度と公開日から算出したスコアの降順
+- **記事データの分離配信** — HTML とは別の `data.json` を読み込むため、更新のたびに再取得するのは記事データだけ
+- **検索と絞り込み** — 右下のボタンからタイトル・要約の検索、タグ／ソース別の絞り込み
+- **既読管理** — 開いた記事は薄く表示。未読のみに絞り込める（localStorage、60日で自動削除）
+- **並び替え** — おすすめ（関連度 × 新しさ）と新着の切り替え
+- **キーボード操作** — `j`/`k` で上下、`h`/`l` で左右、Enter で開く、`/` で検索、Esc で閉じる
 - **直近記事のみ表示** — 公開日が取れる記事は直近2か月分に絞り込み
 - **重複排除** — 同一 URL の記事は複数ソースをまとめて表示
 
+- **オフライン表示** — Service Worker が直近の内容をキャッシュする
+
 ## GitHub Actions による自動実行
 
-`.github/workflows/kijiyomu.yml` で 2 時間ごとに実行し、GitHub Pages へデプロイします。
+`.github/workflows/kijiyomu.yml` で 2 時間ごとに実行し、GitHub Pages へデプロイします。`--out _site/index.html` で成果物を直接 `_site` に書き出すため、コピー手順はありません。
 
 リポジトリの **Settings → Secrets** に以下を登録してください:
 
@@ -157,51 +192,15 @@ feeds:
 | `AI_API_KEY` | API キー |
 | `AI_MODEL` | モデル名 |
 
-キャッシュ（AI 要約・OG イメージ）は `actions/cache` で runs をまたいで保持されます。
+未設定でも実行は通ります（AI 要約とタグ付けがスキップされます）。
 
-## PWA プッシュ通知
+AI 要約・タグ・関連度・OG イメージのキャッシュ（`.kijiyomu_cache.json`）は `actions/cache` で runs をまたいで保持されます。記事一覧から消えて 14 日経ったエントリは自動的に捨てられます。
 
-Cloudflare Worker + KV にブラウザの `PushSubscription` を保存し、GitHub Actions が新着記事を検出したときに Web Push を送ります。
+## PWA
 
-### 1. VAPID キーを作成
+`manifest.json` と `sw.js` を出力するため、ホーム画面に追加してスタンドアロン起動できます。Service Worker のキャッシュ方針は次の通りです。
 
-```bash
-pnpm exec web-push generate-vapid-keys
-```
-
-### 2. Cloudflare Worker を用意
-
-`workers/push-subscriptions/` を Cloudflare Workers にデプロイします。`wrangler.toml` の KV namespace ID を実際の値に置き換えてください。
-
-Worker variables/secrets:
-
-| 名前 | 内容 |
+| 対象 | 方針 |
 |---|---|
-| `PUSH_ADMIN_TOKEN` | GitHub Actions から購読一覧を取得するための任意の長いトークン |
-| `ALLOWED_ORIGIN` | GitHub Pages の origin。例: `https://user.github.io` |
-
-KV binding:
-
-| Binding | 内容 |
-|---|---|
-| `PUSH_SUBSCRIPTIONS` | PushSubscription 保存用 KV namespace |
-
-### 3. GitHub に Variables / Secrets を設定
-
-Repository Variables:
-
-| 名前 | 内容 |
-|---|---|
-| `PUSH_WORKER_URL` | Cloudflare Worker の URL |
-| `VAPID_PUBLIC_KEY` | VAPID public key |
-| `VAPID_SUBJECT` | `mailto:you@example.com` など |
-| `SITE_URL` | 通知クリック時に開く GitHub Pages の URL |
-
-Repository Secrets:
-
-| 名前 | 内容 |
-|---|---|
-| `PUSH_ADMIN_TOKEN` | Worker secret と同じ値 |
-| `VAPID_PRIVATE_KEY` | VAPID private key |
-
-これらが未設定の場合、GitHub Actions は通知送信だけスキップします。PWA 側の通知ボタンも `PUSH_WORKER_URL` と `VAPID_PUBLIC_KEY` が HTML に埋め込まれている場合だけ表示されます。
+| HTML・`data.json` | ネットワーク優先（オフライン時のみキャッシュ） |
+| ロゴ・アイコン | キャッシュ優先（内容が変わらないため） |

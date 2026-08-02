@@ -39,62 +39,39 @@ jobs:
       - name: Restore KijiYomu cache
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          path: |
-            .kijiyomu_cache.json
-            data.json
+          path: .kijiyomu_cache.json
           key: kijiyomu-cache-${{ github.run_id }}
           restore-keys: |
             kijiyomu-cache-
 
-      - name: Preserve previous data snapshot
-        run: |
-          if [ -f data.json ]; then
-            cp data.json previous-data.json
-          fi
-
+      # HTML・data.json・manifest・sw.js・アイコンはすべて出力先に揃うので、
+      # _site へ直接書き出してコピー手順をなくす
       - name: Run KijiYomu
         env:
           AI_API_BASE: ${{ secrets.AI_API_BASE }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_MODEL: ${{ secrets.AI_MODEL }}
-          PUSH_WORKER_URL: ${{ vars.PUSH_WORKER_URL }}
-          VAPID_PUBLIC_KEY: ${{ vars.VAPID_PUBLIC_KEY }}
-        run: go run main.go --data-out data.json
-
-      - name: Notify new articles
-        env:
-          PUSH_WORKER_URL: ${{ vars.PUSH_WORKER_URL }}
-          PUSH_ADMIN_TOKEN: ${{ secrets.PUSH_ADMIN_TOKEN }}
-          VAPID_PUBLIC_KEY: ${{ vars.VAPID_PUBLIC_KEY }}
-          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
-          VAPID_SUBJECT: ${{ vars.VAPID_SUBJECT }}
-          SITE_URL: ${{ vars.SITE_URL }}
-          PREVIOUS_DATA: previous-data.json
-          CURRENT_DATA: data.json
-        run: |
-          if [ -z "$PUSH_WORKER_URL" ] || [ -z "$PUSH_ADMIN_TOKEN" ] || [ -z "$VAPID_PUBLIC_KEY" ] || [ -z "$VAPID_PRIVATE_KEY" ]; then
-            echo "Push notification settings are incomplete; skipping."
-            exit 0
-          fi
-          pnpm run notify:new-articles
+        run: go run main.go --out _site/index.html
 
       # 常に最新状態で保存（key に run_id を含めることで毎回新規保存）
       - name: Save KijiYomu cache
         if: always()
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          path: |
-            .kijiyomu_cache.json
-            data.json
+          path: .kijiyomu_cache.json
           key: kijiyomu-cache-${{ github.run_id }}
 
-      - name: Prepare Pages artifact
+      # 旧 URL をブックマーク・PWA 登録している場合の受け皿
+      - name: Add legacy path redirect
         run: |
-          mkdir -p _site
-          cp kijiyomu.html _site/index.html
-          cp kijiyomu.html _site/kijiyomu.html
-          cp manifest.json sw.js apple-touch-icon.png _site/
-          cp -R static _site/static
+          cat > _site/kijiyomu.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>KijiYomu</title>
+          <link rel="canonical" href="./index.html">
+          <meta http-equiv="refresh" content="0; url=./index.html">
+          <a href="./index.html">KijiYomu</a>
+          HTML
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
